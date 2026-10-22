@@ -3,22 +3,158 @@
   font-family: system-ui, sans-serif;
 }
 
-body {
-  width: 420px;
-  margin: 0;
-  padding: 16px;
-  color: #1b3a4b;
-  background: #f7f4ef;
+* {
   box-sizing: border-box;
 }
 
-h1 {
-  margin: 0 0 8px;
-  font-size: 16px;
+html,
+body {
+  width: 420px;
+  max-width: 420px;
+  margin: 0;
+  overflow-x: hidden;
 }
 
-p {
+body {
+  padding: 12px 14px 14px;
+  color: #1b3a4b;
+  background: #f7f4ef;
+}
+
+h1 {
   margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.titles {
+  min-width: 0;
+}
+
+#count {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: #5c6b73;
+}
+
+button {
+  font: inherit;
+  font-size: 12px;
+  border: 1px solid #c9bfb2;
+  background: #fff;
+  color: #1b3a4b;
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+button:not(:disabled):hover {
+  background: #fffdf8;
+}
+
+.banner {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #8a4b2f;
+}
+
+.empty {
+  margin: 14px 0 4px;
   font-size: 13px;
   line-height: 1.5;
+  color: #3d5560;
+}
+
+.list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  max-height: 460px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.item {
+  min-width: 0;
+  padding: 8px 0;
+  border-top: 1px solid #e4ddd3;
+}
+
+.item:first-child {
+  border-top: 0;
+  padding-top: 2px;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tag {
+  flex: none;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: #e7eef2;
+  color: #1b3a4b;
+}
+
+.tag-audio {
+  background: #e7f0e4;
+}
+
+.tag-hls,
+.tag-dash {
+  background: #f3ead7;
+}
+
+.size,
+.ext {
+  font-size: 12px;
+  color: #5c6b73;
+}
+
+.ext {
+  margin-left: auto;
+}
+
+.url {
+  margin: 6px 0 0;
+  max-width: 100%;
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #6b5428;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
 }

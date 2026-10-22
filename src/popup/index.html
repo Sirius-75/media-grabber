@@ -6,10 +6,16 @@
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main>
-      <h1>Media Grabber</h1>
-      <p id="status">正在加载…</p>
-    </main>
+    <header class="bar">
+      <div class="titles">
+        <h1>Media Grabber</h1>
+        <p id="count">正在读取…</p>
+      </div>
+      <button id="clear" type="button" disabled>清空</button>
+    </header>
+    <p id="banner" class="banner" hidden></p>
+    <p id="empty" class="empty" hidden>当前页面还没有发现音视频。播放一下，或刷新后再打开看看。</p>
+    <ul id="list" class="list"></ul>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>
