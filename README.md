@@ -2,14 +2,16 @@
 
 # Media Grabber
 
-Chrome / Edge Manifest V3 扩展。当前是 T1 工程脚手架：能构建、能以开发者模式加载，background / content / popup 只有占位入口，还不会识别或下载媒体。完整设计见 [PLAN.md](./PLAN.md)。
+Chrome / Edge Manifest V3 扩展。共享层已经能按扩展名和 Content-Type 判断媒体、规范化去重用的 URL。background / content / popup 仍是占位入口，打开扩展还不会列出资源。完整设计见 [PLAN.md](./PLAN.md)。
 
 不破解 DRM，不绕过登录或付费墙。
 
 ## 环境
 
-- Node.js 22+
+- Node.js `^20.19.0 || >=22.12.0`（Node 24 可以用）
 - Chrome 或 Edge
+
+Vite 8 的打包器是 rolldown。Windows 上它要加载 `@rolldown/binding-win32-x64-msvc`，这个包和 Vite 都要求上面的 Node 版本。版本不够时，安装或启动会报找不到 `rolldown-binding.win32-x64-msvc`。`package.json` 的 `engines.node` 写的是同一范围。锁文件里已经包含 Windows 的可选绑定，在本机执行 `npm install` 即可。
 
 ## 安装
 
