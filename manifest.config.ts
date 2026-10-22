@@ -25,8 +25,11 @@ export default defineManifest({
     {
       matches: ['<all_urls>'],
       js: ['src/content/index.ts'],
+      // 每个 frame 各自扫自己的 DOM。不设 world，保持默认的隔离世界，不进入 MAIN。
+      // document_start 才能在页面脚本改 DOM 之前装上 MutationObserver；
+      // 这时 documentElement 可能还没有，入口会等 DOM 可用再扫。
       all_frames: true,
-      run_at: 'document_idle',
+      run_at: 'document_start',
     },
   ],
   action: {

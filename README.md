@@ -2,7 +2,7 @@
 
 # Media Grabber
 
-Chrome / Edge Manifest V3 扩展。共享层已经能按扩展名和 Content-Type 判断媒体、规范化去重用的 URL。background / content / popup 仍是占位入口，打开扩展还不会列出资源。完整设计见 [PLAN.md](./PLAN.md)。
+Chrome / Edge Manifest V3 扩展。共享层按扩展名和 Content-Type 判断媒体。Content script 在隔离环境里扫描本 frame 的 `<video>` / `<audio>`（含 `currentSrc` 和 `<source>`），有变化才把结果发给后台。background / popup 仍是占位，打开扩展还不会列出资源。完整设计见 [PLAN.md](./PLAN.md)。
 
 不破解 DRM，不绕过登录或付费墙。
 

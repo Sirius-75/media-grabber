@@ -22,14 +22,18 @@ describe('manifest', () => {
       service_worker: 'src/background/index.ts',
       type: 'module',
     })
+    // T5：run_at 用 document_start，便于在解析出节点之前装上监听。all_frames 保持开启。
+    // 不声明 world，沿用隔离世界，不注入 MAIN。
     expect(manifest.content_scripts).toEqual([
       {
         matches: ['<all_urls>'],
         js: ['src/content/index.ts'],
         all_frames: true,
-        run_at: 'document_idle',
+        run_at: 'document_start',
       },
     ])
+    const contentScript = manifest.content_scripts?.[0]
+    expect(contentScript !== undefined && 'world' in contentScript).toBe(false)
     expect(manifest.action?.default_popup).toBe('src/popup/index.html')
   })
 })
