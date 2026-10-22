@@ -2,7 +2,7 @@
 
 # Media Grabber
 
-Chrome / Edge Manifest V3 扩展。共享层能判断媒体类型并规范化 URL。后台按标签页把媒体存在 `chrome.storage.session`（service worker 被回收后还在），并更新图标角标；`src/shared/blocklist.ts` 里的域名会被忽略，默认名单是空的。Content script 在隔离环境里扫描本 frame 的 `<video>` / `<audio>`（含 `currentSrc` 和 `<source>`），有变化才发 `MEDIA_FOUND`（tabId 由后台从 `sender.tab.id` 取）。网络嗅探用 `chrome.webRequest.onHeadersReceived` 只读响应头：认成媒体的 2xx 交给 `addMedia`，206 只补已有条目的大小。popup 仍是占位，打开扩展还不会列出资源。完整设计见 [PLAN.md](./PLAN.md)。
+Chrome / Edge Manifest V3 扩展。共享层能判断媒体类型并规范化 URL。后台按标签页把媒体存在 `chrome.storage.session`（service worker 被回收后还在），并更新图标角标；`src/shared/blocklist.ts` 里的域名会被忽略，默认名单是空的。Content script 在隔离环境里扫描本 frame 的 `<video>` / `<audio>`（含 `currentSrc` 和 `<source>`），有变化才发 `MEDIA_FOUND`（tabId 由后台从 `sender.tab.id` 取）。网络嗅探用 `chrome.webRequest.onHeadersReceived` 只读响应头：认成媒体的 2xx 交给 `addMedia`，206 只补已有条目的大小。顶层文档请求（`main_frame` 的 `onBeforeRequest`）一发出就清掉该标签页的旧列表；同一次导航里更晚的 `tabs.onUpdated` loading 不会再清，避免把刚抓到的条目删掉。popup 仍是占位，打开扩展还不会列出资源。完整设计见 [PLAN.md](./PLAN.md)。
 
 不破解 DRM，不绕过登录或付费墙，不修改请求。
 

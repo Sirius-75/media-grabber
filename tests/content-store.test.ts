@@ -108,6 +108,9 @@ function installChrome(): { sent: unknown[]; outbound: Promise<unknown>[] } {
       onRemoved: { addListener() {} },
       onUpdated: { addListener() {} },
     },
+    webRequest: {
+      onBeforeRequest: { addListener() {} },
+    },
     runtime: {
       onMessage: {
         addListener(listener: Listener) {
