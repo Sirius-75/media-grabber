@@ -1,6 +1,8 @@
 /**
- * Service Worker 入口（占位）。
- * 只确认后台脚本能启动，不处理消息、不嗅探、不下载。
+ * Service Worker 入口。
+ * 列表、角标、标签页清理，以及 GET_MEDIA / CLEAR_MEDIA / MEDIA_FOUND
+ * 都在 initStore 里接线。嗅探得到的条目调用 store.addMedia，不要在这里再写一套存储。
+ * DOWNLOAD 留给后续任务。
  */
 import { initStore } from './store'
 import { startSniffer } from './sniffer'
