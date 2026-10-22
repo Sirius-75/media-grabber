@@ -38,6 +38,14 @@ interface NavigationState {
 }
 
 const navigation = new Map<number, NavigationState>()
+/**
+ * 这次顶层导航已经在 main_frame 的 onBeforeRequest 里清过列表。
+ * 文档请求先发出，预加载扫描器随后就会拉 video / audio；这些响应头经常比
+ * tabs.onUpdated 里「URL 已提交」的那次 loading 更早到达。若 loading 再清一次，
+ * 刚写入的条目会被删掉，而请求不会重来。complete 之后才丢掉这个标记，
+ * 让没有 webRequest 的 loading（例如往返缓存）仍能清空。
+ */
+const topLevelRequests = new Set<number>()
 const writeTails = new Map<number, Promise<void>>()
 let listening = false
 
@@ -328,6 +336,7 @@ function rememberNavigation(tabId: number, state: NavigationState): void {
 
 /**
  * 顶层导航和刷新会把 tab.status 设为 loading，这时清掉旧列表。
+ * 若这次导航的 main_frame 请求已经清过，后面的 loading 只更新记忆，不再清空。
  * SPA 的 pushState 只会带上新 url，status 不是 loading，列表保留。
  * 同一轮 loading 里重复的通知不再清第二次，避免把这次导航刚收来的条目抹掉。
  */
@@ -337,6 +346,7 @@ async function handleTabUpdated(
   tab: chrome.tabs.Tab,
 ): Promise<void> {
   if (changeInfo.status === 'complete') {
+    topLevelRequests.delete(tabId)
     rememberNavigation(tabId, {
       loading: false,
       url: changeInfo.url ?? tab.url ?? navigation.get(tabId)?.url,
@@ -346,6 +356,10 @@ async function handleTabUpdated(
 
   if (changeInfo.status === 'loading') {
     const nextUrl = changeInfo.url ?? tab.pendingUrl ?? tab.url
+    if (topLevelRequests.has(tabId)) {
+      rememberNavigation(tabId, { loading: true, url: nextUrl ?? navigation.get(tabId)?.url })
+      return
+    }
     const current = navigation.get(tabId)
     const sameLoad =
       current?.loading === true &&
@@ -361,8 +375,19 @@ async function handleTabUpdated(
   }
 }
 
+/** 顶层文档请求一发出就清空。此时新页面的媒体请求还没开始，不会误删刚抓到的条目。 */
+function onBeforeRequest(details: chrome.webRequest.OnBeforeRequestDetails): undefined {
+  if (details.type !== 'main_frame' || !isValidTabId(details.tabId)) return undefined
+  topLevelRequests.add(details.tabId)
+  void enqueue(details.tabId, () => clearItemsUnlocked(details.tabId)).catch((error: unknown) =>
+    warn('顶层导航时清理失败', error),
+  )
+  return undefined
+}
+
 function onTabRemoved(tabId: number): void {
   navigation.delete(tabId)
+  topLevelRequests.delete(tabId)
   void clearTab(tabId).catch((error: unknown) => warn('关闭标签页时清理失败', error))
 }
 
@@ -451,6 +476,11 @@ export function initStore(): void {
   listening = true
   chrome.tabs.onRemoved.addListener(onTabRemoved)
   chrome.tabs.onUpdated.addListener(onTabUpdated)
+  // 不申请 webNavigation。webRequest 已有权限，main_frame 比 tabs.onUpdated 的 loading 更早。
+  chrome.webRequest.onBeforeRequest.addListener(onBeforeRequest, {
+    urls: ['<all_urls>'],
+    types: ['main_frame'],
+  })
   chrome.runtime.onMessage.addListener(onRuntimeMessage)
   void restoreBadges()
 }

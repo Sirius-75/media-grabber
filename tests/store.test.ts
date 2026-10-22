@@ -30,6 +30,18 @@ function createEvent<A extends unknown[]>(): ListenerEvent<A> {
   }
 }
 
+interface BeforeRequestListener {
+  addListener(
+    listener: (details: chrome.webRequest.OnBeforeRequestDetails) => unknown,
+    filter?: chrome.webRequest.RequestFilter,
+    extra?: string[],
+  ): void
+  dispatch(details: chrome.webRequest.OnBeforeRequestDetails): unknown
+  readonly size: number
+  filter?: chrome.webRequest.RequestFilter
+  extra?: string[]
+}
+
 interface Harness {
   storage: Map<string, unknown>
   badges: Map<number, string>
@@ -39,6 +51,7 @@ interface Harness {
   messages: ListenerEvent<
     [unknown, chrome.runtime.MessageSender, (response?: unknown) => void]
   >
+  beforeRequest: BeforeRequestListener
 }
 
 function installChrome(): Harness {
@@ -50,6 +63,22 @@ function installChrome(): Harness {
   const messages = createEvent<
     [unknown, chrome.runtime.MessageSender, (response?: unknown) => void]
   >()
+  const requests = createEvent<[chrome.webRequest.OnBeforeRequestDetails]>()
+  const beforeRequest: BeforeRequestListener = {
+    addListener(listener, filter, extra) {
+      requests.addListener(listener)
+      beforeRequest.filter = filter
+      beforeRequest.extra = extra
+    },
+    dispatch(details) {
+      let result: unknown
+      for (const listener of requests.listeners) result = listener(details)
+      return result
+    },
+    get size() {
+      return requests.size
+    },
+  }
 
   const mock = {
     storage: {
@@ -93,10 +122,11 @@ function installChrome(): Harness {
     },
     tabs: { onRemoved: removed, onUpdated: updated },
     runtime: { onMessage: messages },
+    webRequest: { onBeforeRequest: beforeRequest },
   }
 
   ;(globalThis as unknown as { chrome: typeof chrome }).chrome = mock as unknown as typeof chrome
-  return { storage, badges, badgeColors, removed, updated, messages }
+  return { storage, badges, badgeColors, removed, updated, messages, beforeRequest }
 }
 
 async function loadStore() {
@@ -127,6 +157,23 @@ function draft(url: string, extra: Partial<MediaItemDraft> = {}): MediaItemDraft
 
 function page(url: string, pendingUrl?: string): chrome.tabs.Tab {
   return { url, pendingUrl } as chrome.tabs.Tab
+}
+
+function request(
+  tabId: number,
+  type: 'main_frame' | 'sub_frame',
+  url: string,
+): chrome.webRequest.OnBeforeRequestDetails {
+  return {
+    url,
+    tabId,
+    type,
+    method: 'GET',
+    frameId: type === 'main_frame' ? 0 : 1,
+    parentFrameId: type === 'main_frame' ? -1 : 0,
+    requestId: `${type}-${url}`,
+    timeStamp: 1,
+  } as chrome.webRequest.OnBeforeRequestDetails
 }
 
 function urlsOf(items: MediaItem[]): string[] {
@@ -381,16 +428,54 @@ describe('清理', () => {
     expect(await getItems(tabId)).toEqual([])
   })
 
+  it('顶层文档请求比 loading 更早清空，之后嗅探到的条目不会被提交阶段的 loading 删掉', async () => {
+    const { beforeRequest, updated, addMedia, getItems } = await setup()
+    const tabId = 9
+    const pageUrl = 'https://example.com/watch'
+    await addMedia(tabId, draft('https://cdn.example/old.mp4'))
+
+    expect(beforeRequest.filter).toEqual({ urls: ['<all_urls>'], types: ['main_frame'] })
+    expect(beforeRequest.extra).toBeUndefined()
+
+    const cleared = beforeRequest.dispatch(request(tabId, 'main_frame', pageUrl))
+    expect(cleared).toBeUndefined()
+    expect(await getItems(tabId)).toEqual([])
+
+    // 新页面的媒体响应头先到，随后 tabs.onUpdated 才带上提交后的 URL。
+    await addMedia(tabId, draft('https://cdn.example/flower.mp4', { size: 100 }))
+    updated.dispatch(tabId, { status: 'loading', url: pageUrl }, page(pageUrl))
+    updated.dispatch(
+      tabId,
+      { status: 'loading' },
+      page(pageUrl, 'https://example.com/watch/'),
+    )
+    expect(urlsOf(await getItems(tabId))).toEqual(['https://cdn.example/flower.mp4'])
+
+    // 子框架和扩展自己的请求（tabId < 0）不能把顶层列表清掉。
+    beforeRequest.dispatch(request(tabId, 'sub_frame', 'https://embed.example/player'))
+    beforeRequest.dispatch(request(-1, 'main_frame', 'https://cdn.example/other.mp4'))
+    expect(urlsOf(await getItems(tabId))).toEqual(['https://cdn.example/flower.mp4'])
+
+    // 这一轮结束后，没有 webRequest 的 loading 仍然会清空。
+    updated.dispatch(tabId, { status: 'complete' }, page(pageUrl))
+    await getItems(tabId)
+    updated.dispatch(tabId, { status: 'loading', url: pageUrl }, page(pageUrl))
+    expect(await getItems(tabId)).toEqual([])
+  })
+
   it('initStore 重复调用不会注册两套监听', async () => {
     const current = await setup()
     const removedBefore = current.removed.size
     const updatedBefore = current.updated.size
     const messagesBefore = current.messages.size
+    const requestsBefore = current.beforeRequest.size
     current.initStore()
     expect(current.removed.size).toBe(removedBefore)
     expect(current.updated.size).toBe(updatedBefore)
     expect(current.messages.size).toBe(messagesBefore)
+    expect(current.beforeRequest.size).toBe(requestsBefore)
     expect(removedBefore).toBe(1)
+    expect(requestsBefore).toBe(1)
   })
 })
 
