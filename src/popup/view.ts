@@ -3,6 +3,14 @@
  * 打开时的消息收发在 main.ts。
  */
 
+import { normalizeUrl } from '../shared/classify'
+import {
+  DOWNLOAD_FAILED_TEXT,
+  DOWNLOAD_STARTED_TEXT,
+  type DownloadPhase,
+  type DownloadStatusMap,
+  type DownloadStatusRecord,
+} from '../shared/download-status'
 import { formatBytes } from '../shared/format'
 import type { MediaItem, MediaKind } from '../shared/types'
 
@@ -94,19 +102,52 @@ export function isMediaItemList(value: unknown): value is MediaItem[] {
   return Array.isArray(value) && value.every(isMediaItem)
 }
 
+export interface DownloadFeedback {
+  phase: Extract<DownloadPhase, 'started' | 'failed'>
+  message: string
+  downloadId?: number
+}
+
+/**
+ * 后台 DOWNLOAD 的回复，转成条目上要留下的状态。
+ * 真正下完是「已完成」，那一步由 downloads.onChanged 写进 session，不在这条回复里。
+ */
+export function statusFromDownloadResponse(response: unknown): DownloadFeedback {
+  if (isRecord(response) && response.ok === true) {
+    const feedback: DownloadFeedback = { phase: 'started', message: DOWNLOAD_STARTED_TEXT }
+    if (typeof response.downloadId === 'number' && Number.isInteger(response.downloadId) && response.downloadId >= 0) {
+      feedback.downloadId = response.downloadId
+    }
+    return feedback
+  }
+  if (isRecord(response) && typeof response.error === 'string' && response.error.trim()) {
+    return { phase: 'failed', message: response.error.trim() }
+  }
+  return { phase: 'failed', message: DOWNLOAD_FAILED_TEXT }
+}
+
 /**
  * 下载按钮上短暂显示的结果。
- * 成功留给真正的下载；本轮后台会回「即将支持」。
- * 句子太长就收成固定文案，避免把一行撑出横向滚动。
+ * 成功是「已开始下载」。失败原因太长时按钮只写「下载失败」，完整句子在条目的状态行上。
  */
 export function downloadFeedback(response: unknown): string {
-  if (!isRecord(response)) return '即将支持'
-  if (response.ok === true) return '已开始'
-  if (typeof response.error === 'string') {
-    const error = response.error.trim()
-    if (error && [...error].length <= 12) return error
-  }
-  return '即将支持'
+  const status = statusFromDownloadResponse(response)
+  if (status.phase === 'started') return status.message
+  if ([...status.message].length <= 12) return status.message
+  return DOWNLOAD_FAILED_TEXT
+}
+
+/** 按规范化后的 URL 取最近一次下载状态。没有就 undefined。 */
+export function statusForItem(
+  item: Pick<MediaItem, 'url'>,
+  statuses: DownloadStatusMap | undefined,
+): DownloadStatusRecord | undefined {
+  if (!statuses) return undefined
+  const direct = statuses[item.url]
+  if (direct) return direct
+  const key = normalizeUrl(item.url)
+  if (!key) return undefined
+  return statuses[key]
 }
 
 export interface ListActions {
@@ -115,8 +156,12 @@ export interface ListActions {
 }
 
 /** 把当前列表画进 ul。调用方保留 ul 上的点击监听，这里只换子节点。 */
-export function renderList(list: HTMLElement, items: readonly MediaItem[]): void {
-  const rows = items.map((item, index) => renderItem(item, index))
+export function renderList(
+  list: HTMLElement,
+  items: readonly MediaItem[],
+  statuses?: DownloadStatusMap,
+): void {
+  const rows = items.map((item, index) => renderItem(item, index, statusForItem(item, statuses)))
   list.replaceChildren(...rows)
 }
 
@@ -158,7 +203,11 @@ export function flashButton(button: HTMLButtonElement, text: string, ms = BUTTON
   }, ms)
 }
 
-function renderItem(item: MediaItem, index: number): HTMLLIElement {
+function renderItem(
+  item: MediaItem,
+  index: number,
+  status: DownloadStatusRecord | undefined,
+): HTMLLIElement {
   const row = document.createElement('li')
   row.className = 'item'
   row.dataset.index = String(index)
@@ -212,11 +261,27 @@ function renderItem(item: MediaItem, index: number): HTMLLIElement {
     download.type = 'button'
     download.className = 'download'
     download.dataset.action = 'download'
-    download.title = '即将支持'
     download.textContent = '下载'
     actions.append(download)
   }
 
   row.append(actions)
+  if (status) setRowStatus(row, status)
   return row
+}
+
+/** 在这一行上写下最近的下载状态。重复调用只改这一段，不重建按钮。 */
+export function setRowStatus(
+  row: HTMLElement,
+  status: Pick<DownloadStatusRecord, 'phase' | 'message'>,
+): void {
+  let el = row.querySelector('.status')
+  if (!(el instanceof HTMLElement)) {
+    el = document.createElement('p')
+    const actions = row.querySelector('.actions')
+    if (actions) row.insertBefore(el, actions)
+    else row.append(el)
+  }
+  el.className = `status status-${status.phase}`
+  el.textContent = status.message
 }

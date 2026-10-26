@@ -5,11 +5,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { MediaItem } from '../src/shared/types'
-import { MESSAGE_TYPE } from '../src/shared/messages'
-import {
-  DOWNLOAD_PENDING_ERROR,
-  handleDownloadMessage,
-} from '../src/background/download'
+import { normalizeUrl } from '../src/shared/classify'
 import {
   BUTTON_FLASH_MS,
   bindListActions,
@@ -20,6 +16,9 @@ import {
   itemNote,
   kindLabel,
   renderList,
+  setRowStatus,
+  statusForItem,
+  statusFromDownloadResponse,
   truncateUrl,
 } from '../src/popup/view'
 
@@ -123,14 +122,24 @@ describe('展示文案', () => {
     expect(itemNote({ ...blobVideo, note: '  ' })).toBe('blob 地址，无法直接下载')
   })
 
-  it('下载回复：成功、占位错误，以及看不懂的响应', () => {
-    expect(downloadFeedback({ ok: true, downloadId: 4 })).toBe('已开始')
-    expect(downloadFeedback({ ok: false, error: DOWNLOAD_PENDING_ERROR })).toBe('即将支持')
+  it('下载回复：成功是已开始下载，短原因留在按钮上，长原因收成下载失败', () => {
+    expect(downloadFeedback({ ok: true, downloadId: 4 })).toBe('已开始下载')
+    expect(downloadFeedback({ ok: false, error: '网络连接失败' })).toBe('网络连接失败')
+    expect(downloadFeedback({ ok: false, error: '服务器拒绝访问（403）' })).toBe('服务器拒绝访问（403）')
     expect(downloadFeedback({ ok: false, error: '  网络拒绝了这次下载请求，请稍后再试  ' })).toBe(
-      '即将支持',
+      '下载失败',
     )
-    expect(downloadFeedback(undefined)).toBe('即将支持')
-    expect(downloadFeedback({ ok: false })).toBe('即将支持')
+    expect(downloadFeedback(undefined)).toBe('下载失败')
+    expect(downloadFeedback({ ok: false })).toBe('下载失败')
+    expect(statusFromDownloadResponse({ ok: true, downloadId: 4 })).toEqual({
+      phase: 'started',
+      message: '已开始下载',
+      downloadId: 4,
+    })
+    expect(statusFromDownloadResponse({ ok: false, error: '  服务器拒绝访问（403）  ' })).toEqual({
+      phase: 'failed',
+      message: '服务器拒绝访问（403）',
+    })
   })
 
   it('只接受像 MediaItem 的数组', () => {
@@ -215,6 +224,37 @@ describe('列表', () => {
     expect(list.querySelectorAll('[data-action="download"]')).toHaveLength(50)
   })
 
+  it('下载状态写在对应条目上，关掉再打开用的是同一份记录', () => {
+    const list = document.createElement('ul')
+    const stored = {
+      [normalizeUrl(video.url)]: {
+        phase: 'failed' as const,
+        message: '服务器拒绝访问（403）',
+        updatedAt: 1,
+      },
+      [audio.url]: {
+        phase: 'complete' as const,
+        message: '已完成',
+        updatedAt: 2,
+      },
+    }
+    renderList(list, [video, audio], stored)
+    const rows = [...list.querySelectorAll('.item')]
+    expect(rows[0].querySelector('.status')?.textContent).toBe('服务器拒绝访问（403）')
+    expect(rows[0].querySelector('.status-failed')).toBeTruthy()
+    expect(rows[1].querySelector('.status')?.textContent).toBe('已完成')
+    expect(rows[1].querySelector('.status-complete')).toBeTruthy()
+    expect(list.querySelector('.download')?.getAttribute('title')).toBeNull()
+    expect(statusForItem(video, stored)?.message).toBe('服务器拒绝访问（403）')
+
+    const button = rows[0].querySelector<HTMLButtonElement>('.download')
+    expect(button).toBeTruthy()
+    setRowStatus(rows[0] as HTMLElement, { phase: 'started', message: '已开始下载' })
+    expect(rows[0].querySelectorAll('.status')).toHaveLength(1)
+    expect(rows[0].querySelector('.status')?.textContent).toBe('已开始下载')
+    expect(button?.textContent).toBe('下载')
+  })
+
   it('复制按钮短暂显示已复制，连点时恢复最初的字', () => {
     vi.useFakeTimers()
     const button = document.createElement('button')
@@ -238,28 +278,5 @@ describe('样式约束', () => {
     expect(css).toMatch(/overflow-x:\s*hidden/)
     expect(css).toMatch(/overflow-y:\s*auto/)
     expect(css).toMatch(/text-overflow:\s*ellipsis/)
-  })
-})
-
-describe('DOWNLOAD 占位', () => {
-  it('只回复即将支持，不把别的消息当成下载', () => {
-    const replies: unknown[] = []
-    const sendResponse = (response?: unknown) => {
-      replies.push(response)
-    }
-    const sender = {} as chrome.runtime.MessageSender
-    expect(
-      handleDownloadMessage(
-        { type: MESSAGE_TYPE.DOWNLOAD, url: 'https://cdn.example/a.mp4' },
-        sender,
-        sendResponse,
-      ),
-    ).toBe(true)
-    expect(replies).toEqual([{ ok: false, error: '即将支持' }])
-
-    expect(
-      handleDownloadMessage({ type: MESSAGE_TYPE.GET_MEDIA, tabId: 1 }, sender, sendResponse),
-    ).toBeUndefined()
-    expect(replies).toHaveLength(1)
   })
 })

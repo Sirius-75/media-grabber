@@ -160,6 +160,15 @@ describe('isDownloadMessage', () => {
     expect(
       isDownloadMessage({ type: MESSAGE_TYPE.DOWNLOAD, url: 'https://cdn.example/a.mp4', filename: 1 }),
     ).toBe(false)
+    expect(
+      isDownloadMessage({ type: MESSAGE_TYPE.DOWNLOAD, url: 'https://cdn.example/a.mp4', tabId: 3 }),
+    ).toBe(true)
+    expect(
+      isDownloadMessage({ type: MESSAGE_TYPE.DOWNLOAD, url: 'https://cdn.example/a.mp4', tabId: -1 }),
+    ).toBe(false)
+    expect(
+      isDownloadMessage({ type: MESSAGE_TYPE.DOWNLOAD, url: 'https://cdn.example/a.mp4', tabId: 1.5 }),
+    ).toBe(false)
     expect(isDownloadMessage({ type: MESSAGE_TYPE.GET_MEDIA, url: 'https://cdn.example/a.mp4' })).toBe(
       false,
     )

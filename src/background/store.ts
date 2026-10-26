@@ -9,7 +9,7 @@
  * 对外主要是 addMedia / addItems / getItems / clearTab / fillMediaSize。
  * T4 嗅探直接调用这些函数，不要自己读写 storage。
  * T5 发 MEDIA_FOUND 即可，initStore 会从 sender.tab.id 取出 tab 再入库。
- * DOWNLOAD 留给后续任务，这里不回复。
+ * DOWNLOAD 由 download.ts 回复，这里不处理。
  */
 
 import { classify, normalizeUrl } from '../shared/classify'
