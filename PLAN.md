@@ -156,35 +156,46 @@ flowchart LR
 
 ## 8. 任务拆分（可独立交给 Cursor / Grok Build）
 
-依赖关系：T1 → (T2, T3) → T4/T5 → T6 → T7；T2 完成后 T3/T4/T5 可以并行做。
+依赖关系：T1 → (T2, T3) → T4/T5 → T6 → T7 → T8；T2 完成后 T3/T4/T5 可以并行做。
 
-### T1 工程脚手架
+| 任务 | 状态 |
+|---|---|
+| T1 工程脚手架 | 已完成 |
+| T2 共享类型与分类 | 已完成 |
+| T3 后台存储 | 已完成 |
+| T4 网络嗅探 | 已完成 |
+| T5 Content Script | 已完成 |
+| T6 Popup | 已完成 |
+| T7 下载 | 已完成 |
+| T8 文档与打包 | 已完成 |
+
+### T1 工程脚手架（已完成）
 - 内容：初始化 `package.json`、TS strict、Vite + `@crxjs/vite-plugin`、`manifest.config.ts`（权限按第 4 节写）、占位图标、空的 background/content/popup 入口、Vitest、`npm run dev/build/test/typecheck`。
 - 验收：
   - `npm run build` 生成 `dist/`，能在 `chrome://extensions` 和 `edge://extensions` 以"加载已解压"方式载入，没有报错；
   - `npm run dev` 下改 popup 文字能热更新；
   - manifest 里的权限和第 4 节完全一致，没有多余的。
 
-### T2 共享类型与分类函数（`src/shared/*`）
+### T2 共享类型与分类函数（`src/shared/*`）（已完成）
 - 内容：`types.ts`、`messages.ts`、`classify.ts`（`classifyByUrl`、`classifyByMime`、`classify(url, mime?)`、`normalizeUrl`）、`format.ts`（`formatBytes`）。
 - 验收：
   - 单元测试覆盖：6 种扩展名、带 query/hash 的 URL、大写扩展名、第 5 节列出的各种 MIME、`.ts`/`.m4s` 被排除、`blob:`/`data:` 返回 `downloadable:false`；
   - `npm test` 全部通过，`classify.ts` 测试覆盖率 ≥ 90%。
 
-### T3 后台存储（`background/store.ts`）
+### T3 后台存储（`background/store.ts`）（已完成）
 - 内容：`addItems(tabId, items)`（合并去重、200 条上限）、`getItems`、`clearTab`；读写都走 `chrome.storage.session`；更新 badge；监听 `tabs.onRemoved` / `tabs.onUpdated` 清理数据。
 - 验收：
   - 用 mock 掉的 chrome.storage 写单测：同一 URL 加两次只剩一条，`sources` 合并，`size` 补全；超过 200 条会丢掉最早的；
   - 手动：在 `chrome://serviceworker-internals` 停掉 SW 后再打开 popup，数据还在；关闭 tab 后数据被清除。
 
-### T4 网络嗅探（`background/sniffer.ts`）
+### T4 网络嗅探（`background/sniffer.ts`）（已完成）
 - 内容：`webRequest.onHeadersReceived`（`urls: ["<all_urls>"]`，`extraInfoSpec: ["responseHeaders"]`），读取 Content-Type 和 Content-Length，调用 `classify`，忽略 `tabId < 0` 和状态码 ≥ 400 的响应，206 只更新大小。
 - 验收：
   - 在测试页 A/B/C（第 9 节）播放后，popup 能显示对应的 mp4/mp3/m3u8/mpd；
   - mp4 能显示大小（服务器返回了 Content-Length 时）；
   - HLS 页面里不会出现成百上千条 `.ts` 分片。
 
-### T5 Content Script DOM 扫描（`content/index.ts`）
+### T5 Content Script DOM 扫描（`content/index.ts`）（已完成）
 - 内容：页面加载后扫描 `video, audio, video source, audio source`，读取 `currentSrc`/`src`；用 `MutationObserver` 监听新增节点和 `src` 属性变化，300ms 防抖后发 `MEDIA_FOUND`；`blob:` 地址带上 `note: "blob 地址，无法直接下载"`。
 - 验收：
   - 测试页 D（`<source>` 多个子元素）里每个 source 都被识别；
@@ -192,23 +203,23 @@ flowchart LR
   - 在 YouTube 上能看到一条被标注了 blob 的条目，并且没有下载按钮；
   - 在普通页面上不会报 console error。
 
-### T6 Popup UI（`popup/*`）
+### T6 Popup UI（`popup/*`）（已完成）
 - 内容：打开时查询当前 tab，发 `GET_MEDIA`；列表显示类型标签（视频/音频/HLS/DASH）、大小（拿不到时显示"未知"）、截断后的 URL（hover 显示全部）；每条都有"复制"按钮，可下载的条目有"下载"按钮；顶部显示数量和"清空"按钮；空列表时给出提示。
 - 验收：
   - 复制后剪贴板里是完整的 URL，按钮短暂显示"已复制"；
   - HLS/DASH/blob 条目没有下载按钮，并带有说明文字；
   - 列表有 50 条时滚动流畅，宽度固定在约 420px，没有横向滚动条。
 
-### T7 下载功能（background `DOWNLOAD` 处理）
+### T7 下载功能（background `DOWNLOAD` 处理）（已完成）
 - 内容：`chrome.downloads.download({ url, filename, saveAs:false })`；文件名用 `tab 标题-序号.扩展名`，过滤掉非法字符，限制长度；失败时把 `error` 返回给 popup 显示。
 - 验收：
   - 在测试页 A 点击下载，文件出现在下载目录，扩展名正确；
   - 标题里含 `/:*?"<>|` 时也能正常下载；
   - 对 403 的链接，popup 显示失败原因，不会卡住。
 
-### T8 文档与打包（可选）
-- 内容：README（安装、开发、已知限制），`npm run zip` 打包 dist。
-- 验收：按 README 从零 clone 到加载扩展，不需要额外步骤；第 9 节的测试清单全部通过并在 README 里打勾。
+### T8 文档与打包（已完成）
+- 内容：README（安装、开发、已知限制），`npm run package` 先构建，再把 dist 打成 `release/media-grabber-<version>.zip`（zip 根目录是 `manifest.json`）。
+- 验收：按 README 从零 clone 到加载扩展，不需要额外步骤；`npm run typecheck`、`npm test`、`npm run build`、`npm run package` 都通过。第 9 节仍是手动清单，需要在 Chrome / Edge 里逐条点过再打勾。
 
 ## 9. 手动测试清单
 
