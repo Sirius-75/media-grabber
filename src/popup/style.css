@@ -145,12 +145,28 @@ button:not(:disabled):hover {
   white-space: nowrap;
 }
 
-.note {
+.note,
+.status {
   margin: 4px 0 0;
   font-size: 12px;
   line-height: 1.4;
-  color: #6b5428;
   overflow-wrap: anywhere;
+}
+
+.note {
+  color: #6b5428;
+}
+
+.status-started {
+  color: #1a5f7a;
+}
+
+.status-complete {
+  color: #2d6a4f;
+}
+
+.status-failed {
+  color: #8a4b2f;
 }
 
 .actions {

@@ -41,11 +41,16 @@ export interface ClearMediaMessage {
   tabId: number
 }
 
-/** popup → background。filename 可选，后台会再做非法字符过滤。 */
+/**
+ * popup → background。
+ * filename 可选，后台会再做非法字符过滤；没给时用页面标题或 URL 文件名。
+ * tabId 可选，用来取这个标签页的标题和列表序号。
+ */
 export interface DownloadMessage {
   type: typeof MESSAGE_TYPE.DOWNLOAD
   url: string
   filename?: string
+  tabId?: number
 }
 
 export interface DownloadResponse {
@@ -117,6 +122,7 @@ export function isClearMediaMessage(value: unknown): value is ClearMediaMessage 
 export function isDownloadMessage(value: unknown): value is DownloadMessage {
   if (!isRecord(value) || value.type !== MESSAGE_TYPE.DOWNLOAD) return false
   if (typeof value.url !== 'string' || value.url.trim() === '') return false
+  if (value.tabId !== undefined && !isTabId(value.tabId)) return false
   if (value.filename === undefined) return true
   return typeof value.filename === 'string' && value.filename.trim() !== ''
 }
