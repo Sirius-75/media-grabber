@@ -10,6 +10,8 @@ import {
   BUTTON_FLASH_MS,
   bindListActions,
   canOfferDownload,
+  canOfferHlsDownload,
+  hlsJobForItem,
   downloadFeedback,
   flashButton,
   isMediaItemList,
@@ -49,7 +51,7 @@ const hls = item({
   kind: 'hls',
   ext: 'm3u8',
   downloadable: false,
-  note: 'HLS 清单，仅支持复制链接',
+  note: 'HLS 清单，可下载未加密的点播',
 })
 
 const dash = item({
@@ -110,11 +112,15 @@ describe('展示文案', () => {
     expect(canOfferDownload({ ...audio, url: 'data:audio/mpeg;base64,AA', downloadable: true })).toBe(
       false,
     )
+    expect(canOfferHlsDownload(hls)).toBe(true)
+    expect(canOfferHlsDownload(dash)).toBe(false)
+    expect(canOfferHlsDownload(video)).toBe(false)
+    expect(canOfferHlsDownload({ ...hls, url: 'blob:https://example.com/1' })).toBe(false)
   })
 
   it('不可下载的条目带说明，直链没有多余说明', () => {
     expect(itemNote(video)).toBeUndefined()
-    expect(itemNote(hls)).toBe('HLS 清单，仅支持复制链接')
+    expect(itemNote(hls)).toBe('HLS 清单，可下载未加密的点播')
     expect(itemNote(dash)).toBe('DASH 清单，仅支持复制链接')
     expect(itemNote(blobVideo)).toBe('blob 地址，无法直接下载')
     expect(itemNote(dataAudio)).toBe('data 地址，无法直接下载')
@@ -152,7 +158,7 @@ describe('展示文案', () => {
 })
 
 describe('列表', () => {
-  it('复制拿到完整链接；HLS、DASH、blob、data 和不可下载条目没有下载按钮', () => {
+  it('复制拿到完整链接；HLS 有自己的下载按钮，DASH、blob、data 没有', () => {
     const blocked = item({
       url: 'https://cdn.example/locked.mp4',
       kind: 'video',
@@ -183,6 +189,11 @@ describe('列表', () => {
     downloadButtons[0].click()
     expect(downloads).toEqual([video.url])
 
+    const hlsButtons = [...list.querySelectorAll<HTMLButtonElement>('[data-action="hls-download"]')]
+    expect(hlsButtons).toHaveLength(1)
+    hlsButtons[0].click()
+    expect(downloads).toEqual([video.url])
+
     const urlNodes = [...list.querySelectorAll('.url')]
     expect(urlNodes[4].getAttribute('title')).toBe(blobVideo.url)
     expect(urlNodes[4].textContent).not.toBe(blobVideo.url)
@@ -190,7 +201,7 @@ describe('列表', () => {
 
     const notes = [...list.querySelectorAll('.note')].map((node) => node.textContent)
     expect(notes).toEqual([
-      'HLS 清单，仅支持复制链接',
+      'HLS 清单，可下载未加密的点播',
       'DASH 清单，仅支持复制链接',
       'blob 地址，无法直接下载',
       'data 地址，无法直接下载',
@@ -268,6 +279,85 @@ describe('列表', () => {
     vi.advanceTimersByTime(1)
     expect(button.textContent).toBe('复制')
     vi.useRealTimers()
+  })
+})
+
+describe('HLS 下载界面', () => {
+  it('主清单先选清晰度，默认停在列表第一项；下载中显示进度和取消', () => {
+    const list = document.createElement('ul')
+    const high = 'https://cdn.example/high.m3u8'
+    const low = 'https://cdn.example/low.m3u8'
+    const starts: string[] = []
+    const cancels: string[] = []
+    const picks: string[] = []
+    bindListActions(list, () => [hls], {
+      onCopy() {},
+      onDownload() {},
+      onHlsStart(_url, mediaUrl) {
+        starts.push(mediaUrl)
+      },
+      onHlsCancel(url) {
+        cancels.push(url)
+      },
+      onHlsVariant(_url, mediaUrl) {
+        picks.push(mediaUrl)
+      },
+    })
+
+    renderList(list, [hls], undefined, {
+      [hls.url]: {
+        phase: 'picking',
+        message: '请选择清晰度',
+        completed: 0,
+        total: 0,
+        updatedAt: 1,
+        variants: [
+          { url: high, label: '1920×1080 · 4500 kbps', bandwidth: 4500000, separateAudio: false },
+          { url: low, label: '640×360 · 800 kbps', bandwidth: 800000, separateAudio: true },
+        ],
+      },
+    })
+    const select = list.querySelector('select')
+    expect(select).toBeTruthy()
+    expect(select?.value).toBe(high)
+    if (select) {
+      select.value = low
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    expect(picks).toEqual([low])
+    list.querySelector<HTMLButtonElement>('[data-action="hls-start"]')?.click()
+    expect(starts).toEqual([low])
+
+    const preferred = new Map([[hls.url, low]])
+    renderList(
+      list,
+      [hls],
+      undefined,
+      {
+        [hls.url]: {
+          phase: 'downloading',
+          message: '已下载 2/10',
+          completed: 2,
+          total: 10,
+          warning: '共 300 个分片，拼接时会占用较多内存',
+          updatedAt: 2,
+        },
+      },
+      preferred,
+    )
+    expect(list.querySelector('.progress-fill')?.getAttribute('style')).toContain('20%')
+    expect(list.querySelector('.status')?.textContent).toBe('已下载 2/10')
+    expect(list.querySelector('.warning')?.textContent).toContain('内存')
+    expect(list.querySelector('[data-action="hls-download"]')).toBeNull()
+    list.querySelector<HTMLButtonElement>('[data-action="hls-cancel"]')?.click()
+    expect(cancels).toEqual([hls.url])
+    expect(hlsJobForItem(hls, { [hls.url]: { phase: 'failed', message: '服务器拒绝访问（403）', completed: 0, total: 1, updatedAt: 3 } })?.message).toBe(
+      '服务器拒绝访问（403）',
+    )
+  })
+
+  it('旧的「仅复制」说明改成可以下载未加密点播', () => {
+    expect(itemNote({ ...hls, note: 'HLS 清单，仅支持复制链接' })).toBe('HLS 清单，可下载未加密的点播')
   })
 })
 

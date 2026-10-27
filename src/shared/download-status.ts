@@ -4,6 +4,7 @@
  */
 
 import { classify } from './classify'
+import { HLS_TEXT } from './hls'
 import type { MediaKind } from './types'
 
 export const DOWNLOAD_STATUS_STORAGE_KEY = 'download-status'
@@ -16,7 +17,6 @@ export const DOWNLOAD_FAILED_TEXT = '下载失败'
 /** 每个条目上最多留这么多条最近状态，避免 session 越积越长。 */
 export const MAX_REMEMBERED_DOWNLOADS = 50
 
-const HLS_NOTE = 'HLS 清单，仅支持复制链接'
 const DASH_NOTE = 'DASH 清单，仅支持复制链接'
 const BLOB_NOTE = 'blob 地址，无法直接下载'
 const DATA_NOTE = 'data 地址，无法直接下载'
@@ -107,7 +107,7 @@ export function downloadBlockReason(input: DownloadBlockInput): string | undefin
   if (scheme === 'data') return noteOr(input.note, DATA_NOTE)
   if (scheme !== 'http' && scheme !== 'https') return SCHEME_NOTE
 
-  if (input.kind === 'hls') return noteOr(input.note, HLS_NOTE)
+  if (input.kind === 'hls') return HLS_TEXT.directBlock
   if (input.kind === 'dash') return noteOr(input.note, DASH_NOTE)
 
   if (input.fromStore) {
@@ -118,11 +118,10 @@ export function downloadBlockReason(input: DownloadBlockInput): string | undefin
   }
 
   const classified = classify(url)
+  if (classified?.kind === 'hls') return HLS_TEXT.directBlock
+  if (classified?.kind === 'dash') return noteOr(classified.note, DASH_NOTE)
   if (!classified || classified.downloadable !== true) {
     return noteOr(classified?.note ?? input.note, GENERIC_NOTE)
-  }
-  if (classified.kind === 'hls' || classified.kind === 'dash') {
-    return noteOr(classified.note, classified.kind === 'hls' ? HLS_NOTE : DASH_NOTE)
   }
   return undefined
 }

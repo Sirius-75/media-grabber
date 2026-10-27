@@ -34,7 +34,7 @@ interface RecognizedMedia {
 
 const BLOB_NOTE = 'blob 地址，无法直接下载'
 const DATA_NOTE = 'data 地址，无法直接下载'
-const HLS_NOTE = 'HLS 清单，仅支持复制链接'
+const HLS_NOTE = 'HLS 清单，可下载未加密的点播'
 const DASH_NOTE = 'DASH 清单，仅支持复制链接'
 
 /** 看 pathname 的后缀，不看 query 和 hash。 */

@@ -73,7 +73,7 @@ describe('detailsToMediaItem 识别并带上大小', () => {
       size: 300,
       sources: ['network'],
       downloadable: false,
-      note: 'HLS 清单，仅支持复制链接',
+      note: 'HLS 清单，可下载未加密的点播',
       firstSeen: SEEN,
     })
   })

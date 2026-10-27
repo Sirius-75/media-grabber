@@ -13,7 +13,15 @@ import {
   type DownloadStatusMap,
   type DownloadStatusRecord,
 } from '../shared/download-status'
-import { MESSAGE_TYPE, type DownloadMessage } from '../shared/messages'
+import { HLS_TEXT } from '../shared/hls'
+import {
+  HLS_JOB_STORAGE_KEY,
+  readHlsJobMap,
+  readHlsUserResponse,
+  type HlsJobMap,
+  type HlsJobRecord,
+} from '../shared/hls-job'
+import { MESSAGE_TYPE, type DownloadMessage, type HlsDownloadMessage, type HlsInspectMessage } from '../shared/messages'
 import type { MediaItem } from '../shared/types'
 import {
   bindListActions,
@@ -34,6 +42,9 @@ const clearButton = document.querySelector('#clear')
 let tabId: number | undefined
 let items: MediaItem[] = []
 let statuses: DownloadStatusMap = {}
+let jobs: HlsJobMap = {}
+/** 用户在清晰度列表里点过的地址。重画列表时不要跳回默认项。 */
+const preferredVariant = new Map<string, string>()
 
 function showBanner(text: string): void {
   if (!(bannerEl instanceof HTMLElement)) return
@@ -55,7 +66,7 @@ function paint(): void {
 
   countEl.textContent = `共 ${items.length} 条`
   clearButton.disabled = tabId === undefined || items.length === 0
-  renderList(listEl, items, statuses)
+  renderList(listEl, items, statuses, jobs, preferredVariant)
   const isEmpty = items.length === 0
   emptyEl.hidden = !isEmpty
   listEl.hidden = isEmpty
@@ -130,19 +141,61 @@ function rememberLocal(url: string, record: Omit<DownloadStatusRecord, 'updatedA
   }
 }
 
-async function readStatuses(): Promise<DownloadStatusMap> {
-  const stored = await chrome.storage.session.get(DOWNLOAD_STATUS_STORAGE_KEY)
-  return readDownloadStatusMap(stored[DOWNLOAD_STATUS_STORAGE_KEY])
+async function readSession(): Promise<void> {
+  const stored = await chrome.storage.session.get([DOWNLOAD_STATUS_STORAGE_KEY, HLS_JOB_STORAGE_KEY])
+  statuses = readDownloadStatusMap(stored[DOWNLOAD_STATUS_STORAGE_KEY])
+  jobs = readHlsJobMap(stored[HLS_JOB_STORAGE_KEY])
+}
+
+function rememberJob(url: string, record: Omit<HlsJobRecord, 'updatedAt'>): void {
+  jobs = {
+    ...jobs,
+    [statusKey(url)]: { ...record, updatedAt: Date.now() },
+  }
+}
+
+function sameJobs(left: HlsJobMap, right: HlsJobMap): boolean {
+  const leftKeys = Object.keys(left)
+  const rightKeys = Object.keys(right)
+  if (leftKeys.length !== rightKeys.length) return false
+  return leftKeys.every((key) => {
+    const a = left[key]
+    const b = right[key]
+    if (!a || !b) return false
+    if (a.phase !== b.phase || a.message !== b.message || a.completed !== b.completed) return false
+    if (a.total !== b.total || a.warning !== b.warning) return false
+    const leftVariants = a.variants ?? []
+    const rightVariants = b.variants ?? []
+    if (leftVariants.length !== rightVariants.length) return false
+    return leftVariants.every((variant, index) => variant.url === rightVariants[index]?.url && variant.label === rightVariants[index]?.label)
+  })
 }
 
 function onStorageChanged(
   changes: Record<string, chrome.storage.StorageChange>,
   area: chrome.storage.AreaName,
 ): void {
-  if (area !== 'session' || !(DOWNLOAD_STATUS_STORAGE_KEY in changes)) return
-  const next = readDownloadStatusMap(changes[DOWNLOAD_STATUS_STORAGE_KEY]?.newValue)
-  if (sameStatuses(statuses, next)) return
-  statuses = next
+  if (area !== 'session') return
+  let nextStatuses = statuses
+  let nextJobs = jobs
+  let changed = false
+  if (DOWNLOAD_STATUS_STORAGE_KEY in changes) {
+    const parsed = readDownloadStatusMap(changes[DOWNLOAD_STATUS_STORAGE_KEY]?.newValue)
+    if (!sameStatuses(statuses, parsed)) {
+      nextStatuses = parsed
+      changed = true
+    }
+  }
+  if (HLS_JOB_STORAGE_KEY in changes) {
+    const parsed = readHlsJobMap(changes[HLS_JOB_STORAGE_KEY]?.newValue)
+    if (!sameJobs(jobs, parsed)) {
+      nextJobs = parsed
+      changed = true
+    }
+  }
+  if (!changed) return
+  statuses = nextStatuses
+  jobs = nextJobs
   paint()
 }
 
@@ -157,6 +210,92 @@ function liveDownloadRow(url: string, button: HTMLButtonElement): HTMLElement | 
   const index = items.findIndex((item) => item.url === url || statusKey(item.url) === key)
   const row = listEl.querySelectorAll('.item')[index]
   return row instanceof HTMLElement ? row : undefined
+}
+
+async function requestHlsDownload(url: string): Promise<void> {
+  rememberJob(url, { phase: 'inspecting', message: HLS_TEXT.inspecting, completed: 0, total: 0 })
+  paint()
+  const message: HlsInspectMessage = { type: MESSAGE_TYPE.HLS_INSPECT, url }
+  if (tabId !== undefined) message.tabId = tabId
+  try {
+    const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))
+    if (!response || response.ok === false) {
+      rememberJob(url, {
+        phase: 'failed',
+        message: response && response.ok === false ? response.error : '读取清单失败',
+        completed: 0,
+        total: 0,
+      })
+      paint()
+      return
+    }
+    if ('kind' in response && response.kind === 'master') {
+      rememberJob(url, {
+        phase: 'picking',
+        message: HLS_TEXT.picking,
+        completed: 0,
+        total: 0,
+        variants: response.variants,
+      })
+      paint()
+      return
+    }
+    if ('kind' in response && response.kind === 'media') {
+      rememberJob(url, {
+        phase: 'downloading',
+        message: HLS_TEXT.started,
+        completed: 0,
+        total: response.total,
+        warning: response.warning,
+      })
+      paint()
+      return
+    }
+    rememberJob(url, { phase: 'failed', message: '读取清单失败', completed: 0, total: 0 })
+    paint()
+  } catch {
+    rememberJob(url, { phase: 'failed', message: '读取清单失败', completed: 0, total: 0 })
+    paint()
+  }
+}
+
+async function startHlsDownload(url: string, mediaUrl: string): Promise<void> {
+  if (!mediaUrl) {
+    rememberJob(url, { phase: 'failed', message: HLS_TEXT.noVariants, completed: 0, total: 0 })
+    paint()
+    return
+  }
+  preferredVariant.set(url, mediaUrl)
+  rememberJob(url, { phase: 'downloading', message: HLS_TEXT.started, completed: 0, total: 0 })
+  paint()
+  const message: HlsDownloadMessage = { type: MESSAGE_TYPE.HLS_DOWNLOAD, url, mediaUrl }
+  if (tabId !== undefined) message.tabId = tabId
+  try {
+    const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))
+    if (!response || response.ok === false) {
+      rememberJob(url, {
+        phase: 'failed',
+        message: response && response.ok === false ? response.error : HLS_TEXT.offscreen,
+        completed: 0,
+        total: 0,
+      })
+      paint()
+    }
+  } catch {
+    rememberJob(url, { phase: 'failed', message: HLS_TEXT.offscreen, completed: 0, total: 0 })
+    paint()
+  }
+}
+
+async function cancelHlsDownload(url: string): Promise<void> {
+  rememberJob(url, { phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0 })
+  paint()
+  try {
+    await chrome.runtime.sendMessage({ type: MESSAGE_TYPE.HLS_CANCEL, url })
+  } catch {
+    rememberJob(url, { phase: 'failed', message: '取消失败，请再试一次', completed: 0, total: 0 })
+    paint()
+  }
 }
 
 async function requestDownload(url: string, button: HTMLButtonElement): Promise<void> {
@@ -230,11 +369,13 @@ async function load(): Promise<void> {
     }
     items = response
     try {
-      statuses = await readStatuses()
+      await readSession()
     } catch {
       statuses = {}
+      jobs = {}
     }
     paint()
+    void chrome.runtime.sendMessage({ type: MESSAGE_TYPE.HLS_SYNC }).catch(() => undefined)
   } catch {
     items = []
     paint()
@@ -255,6 +396,18 @@ function start(): void {
     },
     onDownload(url, button) {
       void requestDownload(url, button)
+    },
+    onHlsDownload(url) {
+      void requestHlsDownload(url)
+    },
+    onHlsStart(url, mediaUrl) {
+      void startHlsDownload(url, mediaUrl)
+    },
+    onHlsCancel(url) {
+      void cancelHlsDownload(url)
+    },
+    onHlsVariant(url, mediaUrl) {
+      preferredVariant.set(url, mediaUrl)
     },
   })
   chrome.storage.onChanged.addListener(onStorageChanged)

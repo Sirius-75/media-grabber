@@ -17,6 +17,10 @@ export const MESSAGE_TYPE = {
   GET_MEDIA: 'GET_MEDIA',
   CLEAR_MEDIA: 'CLEAR_MEDIA',
   DOWNLOAD: 'DOWNLOAD',
+  HLS_INSPECT: 'HLS_INSPECT',
+  HLS_DOWNLOAD: 'HLS_DOWNLOAD',
+  HLS_CANCEL: 'HLS_CANCEL',
+  HLS_SYNC: 'HLS_SYNC',
 } as const
 
 export type MessageType = (typeof MESSAGE_TYPE)[keyof typeof MESSAGE_TYPE]
@@ -59,11 +63,41 @@ export interface DownloadResponse {
   error?: string
 }
 
+/** popup → background。读 m3u8：主清单返回清晰度，媒体清单直接开始下载。 */
+export interface HlsInspectMessage {
+  type: typeof MESSAGE_TYPE.HLS_INSPECT
+  url: string
+  tabId?: number
+}
+
+/** popup → background。主清单里选定一条清晰度后再下载。mediaUrl 必须属于这条清单。 */
+export interface HlsDownloadMessage {
+  type: typeof MESSAGE_TYPE.HLS_DOWNLOAD
+  url: string
+  mediaUrl: string
+  tabId?: number
+}
+
+/** popup → background。取消这条清单正在进行的分片下载。 */
+export interface HlsCancelMessage {
+  type: typeof MESSAGE_TYPE.HLS_CANCEL
+  url: string
+}
+
+/** popup 重新打开时发一次，让后台把已经中断的进度标成失败。 */
+export interface HlsSyncMessage {
+  type: typeof MESSAGE_TYPE.HLS_SYNC
+}
+
 export type ExtensionMessage =
   | MediaFoundMessage
   | GetMediaMessage
   | ClearMediaMessage
   | DownloadMessage
+  | HlsInspectMessage
+  | HlsDownloadMessage
+  | HlsCancelMessage
+  | HlsSyncMessage
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -127,11 +161,41 @@ export function isDownloadMessage(value: unknown): value is DownloadMessage {
   return typeof value.filename === 'string' && value.filename.trim() !== ''
 }
 
+function isHttpishUrl(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+export function isHlsInspectMessage(value: unknown): value is HlsInspectMessage {
+  if (!isRecord(value) || value.type !== MESSAGE_TYPE.HLS_INSPECT) return false
+  if (!isHttpishUrl(value.url)) return false
+  if (value.tabId !== undefined && !isTabId(value.tabId)) return false
+  return true
+}
+
+export function isHlsDownloadMessage(value: unknown): value is HlsDownloadMessage {
+  if (!isRecord(value) || value.type !== MESSAGE_TYPE.HLS_DOWNLOAD) return false
+  if (!isHttpishUrl(value.url) || !isHttpishUrl(value.mediaUrl)) return false
+  if (value.tabId !== undefined && !isTabId(value.tabId)) return false
+  return true
+}
+
+export function isHlsCancelMessage(value: unknown): value is HlsCancelMessage {
+  return isRecord(value) && value.type === MESSAGE_TYPE.HLS_CANCEL && isHttpishUrl(value.url)
+}
+
+export function isHlsSyncMessage(value: unknown): value is HlsSyncMessage {
+  return isRecord(value) && value.type === MESSAGE_TYPE.HLS_SYNC
+}
+
 export function isExtensionMessage(value: unknown): value is ExtensionMessage {
   return (
     isMediaFoundMessage(value) ||
     isGetMediaMessage(value) ||
     isClearMediaMessage(value) ||
-    isDownloadMessage(value)
+    isDownloadMessage(value) ||
+    isHlsInspectMessage(value) ||
+    isHlsDownloadMessage(value) ||
+    isHlsCancelMessage(value) ||
+    isHlsSyncMessage(value)
   )
 }

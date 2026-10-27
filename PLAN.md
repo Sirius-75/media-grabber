@@ -14,8 +14,10 @@ Chrome / Edge Manifest V3 扩展，**仅自用**。作用是识别当前页面�
 | 按 tab 去重存储 | ✅ | |
 | popup 列表：类型 / 大小 / URL，复制链接 | ✅ | |
 | 直链用 `chrome.downloads` 下载 | ✅ | |
-| HLS / DASH 只复制清单链接 | ✅ | |
-| 下载 HLS/DASH 分片并合并 | | ⏳ |
+| HLS / DASH 只复制清单链接 | ✅ | DASH 仍只复制；HLS 见第 10 节 |
+| 下载未加密 HLS 点播并按顺序拼接 | | ✅ V2-1 |
+| TS 转封装成 mp4 | | ⏳ V2-2 |
+| DASH 下载，以及音视频分轨合并 | | ⏳ V2-3 |
 | 动态插入的 iframe 深层识别、标题命名优化 | | ⏳ |
 
 ## 2. 技术栈
@@ -62,7 +64,7 @@ media-grabber/
 ## 4. manifest 权限清单
 
 ```ts
-permissions: ["webRequest", "downloads", "storage", "tabs", "clipboardWrite"],
+permissions: ["webRequest", "downloads", "storage", "tabs", "clipboardWrite", "offscreen"],
 host_permissions: ["<all_urls>"],
 content_scripts: [{ matches: ["<all_urls>"], js: ["src/content/index.ts"], all_frames: true, run_at: "document_idle" }],
 background: { service_worker: "src/background/index.ts", type: "module" },
@@ -77,8 +79,9 @@ action: { default_popup: "src/popup/index.html" }
 | `storage` | 用 `chrome.storage.session` 存每个 tab 的资源列表。service worker 会被回收，存储能保证数据不丢；关掉浏览器后自动清空。 |
 | `tabs` | popup 要拿到当前 tab 的 id 和标题（标题用于生成文件名）；后台还要监听 `tabs.onRemoved` 和导航事件来清理数据。 |
 | `clipboardWrite` | popup 里用 `navigator.clipboard.writeText` 复制链接。popup 有用户手势时通常不需要这个权限，这里声明上是为了保险，可选。 |
+| `offscreen` | v2 才加。HLS 分片要在扩展页面里拼成 Blob。这个长任务不能放在会被回收的 service worker 里，所以用 `chrome.offscreen` 开一个不显示的文档。理由见第 10 节。 |
 
-不申请的权限：`declarativeNetRequest`（不需要改请求）、`scripting`（用静态 content script 就够了）、`cookies`、`debugger`。
+不申请的权限：`declarativeNetRequest`（不改请求，也不伪造 Referer 或其他请求头）、`scripting`（用静态 content script 就够了）、`cookies`、`debugger`。
 
 ## 5. 数据模型
 
@@ -144,9 +147,9 @@ flowchart LR
 
 ## 7. 已知限制
 
-1. **DRM / 加密**：带 EME 加密的内容（Netflix、付费平台等）不处理；HLS 带 `#EXT-X-KEY` 时只复制链接，不做额外提示以外的事情。
+1. **DRM / 加密**：带 EME 加密的内容（Netflix、付费平台等）不处理。HLS 只要出现 `#EXT-X-KEY`（AES-128、SAMPLE-AES 等）或 `#EXT-X-SESSION-KEY`，下载会停下来，并用中文说明不支持加密或 DRM。`METHOD=NONE` 不算加密。
 2. **blob: / MSE**：大多数现代播放器（YouTube、B 站等）用 MediaSource 播放，`<video>` 上看到的是 `blob:`，无法直接下载；真实地址往往是分片或清单，只能靠 webRequest 去碰运气。
-3. **分片流**：HLS/DASH 在 MVP 里只能复制清单链接，需要用外部工具（比如 ffmpeg、yt-dlp）下载。
+3. **分片流**：DASH（mpd）仍然只能复制清单链接。未加密的 HLS 点播可以下载，见第 10 节。直播（没有 `#EXT-X-ENDLIST`）不下载。TS 原样存成 `.ts`，不会转成 mp4。
 4. **大小未知**：分块传输、没有 `Content-Length`、或者只看到 Range 片段时，大小显示"未知"或不准。
 5. **防盗链 / 鉴权**：有些链接依赖 Referer、Cookie 或会过期的签名，`chrome.downloads` 下载可能报 403，复制出去用也可能失效。
 6. **Service worker 回收**：SW 被回收期间发生的请求不会丢（事件会唤醒 SW），但内存状态会丢，所以一律用 storage.session。
@@ -229,7 +232,7 @@ flowchart LR
 |---|---|---|---|
 | A | `<video src>` 直链 mp4 | MDN `<video>` 元素文档页的示例；或者本地 `test.html` 引用 Big Buck Bunny 的公开 mp4 | DOM + 网络各识别一次但合并为一条，显示大小，能下载 |
 | B | `<audio>` mp3 | MDN `<audio>` 文档示例 | 识别为音频，能下载 |
-| C1 | HLS m3u8 | hls.js 官方 demo 页（`hlsjs.video-dev.org/demo`），或 Apple 的 HLS 示例流 | 出现一条 HLS 清单，只能复制；`.ts` 分片不出现 |
+| C1 | HLS m3u8 | hls.js 官方 demo 页（`hlsjs.video-dev.org/demo`），或 Apple 的 HLS 示例流 | 出现一条 HLS 清单，`.ts` 分片不出现在列表里。未加密点播可以下载；主清单要先选清晰度。直播、带 KEY 的清单、mpd 仍然不能下 |
 | C2 | DASH mpd | dash.js 参考播放器（`reference.dashif.org/dash.js`） | 出现一条 DASH，只能复制；`.m4s` 不出现 |
 | D | 多个 `<source>` 子元素 | 本地 `tests/pages/sources.html`（webm + mp4 两个 source） | 两个 source 都列出来 |
 | E | blob / MSE 播放 | YouTube 或 B 站任意公开视频 | DOM 条目标注 blob、不可下载；不报错 |
@@ -245,3 +248,66 @@ flowchart LR
 - [ ] SW 被停止后再打开 popup，数据还在
 - [ ] 扩展的 errors 页面没有报错
 - [ ] 访问带 DRM 的页面时扩展不做任何绕过，只按普通资源规则列出能看到的 URL
+- [ ] 未加密 HLS 点播：主清单能选清晰度（默认最高），进度条会走，取消有效，关掉 popup 再打开还能看到进度
+- [ ] 直播 m3u8、带 EXT-X-KEY 的 m3u8 会用中文拒绝，不会开始下分片
+- [ ] DASH 仍然只有复制，没有下载按钮
+- [ ] 下载出来的文件：普通 TS 是 `.ts`，带 EXT-X-MAP 的 fMP4 是 `.mp4`（只是顺序拼接，没有转封装）
+
+## 10. v2
+
+MVP（T1–T8）只把 m3u8 / mpd 列出来供复制。v2 分成三步。**本次只做 V2-1。** V2-2 和 V2-3 先写在这里，不实现。
+
+### V2-1 HLS 下载（本次）
+
+未加密的点播 m3u8 可以在 popup 里下载。DASH 不动。
+
+1. **解析**（`src/shared/hls.ts`，纯函数）
+   - 主清单读出各条 `#EXT-X-STREAM-INF` 的 `BANDWIDTH` / `RESOLUTION`。按带宽从高到低排，默认选最高。
+   - 媒体清单读出分片。相对地址用标准 URL 规则拼到清单上（不把清单 query 里的 token 抄到分片上）。
+   - `#EXT-X-MAP` 是 fMP4 初始化段，拼在分片前面。有它就存 `.mp4`，没有就存 `.ts`。
+   - `#EXT-X-DISCONTINUITY` 允许，分片仍按出现顺序接成一个文件。
+2. **明确拒绝，并给中文原因**
+   - 没有 `#EXT-X-ENDLIST` 的直播。
+   - 任何 `#EXT-X-KEY`（`METHOD=NONE` 除外）和 `#EXT-X-SESSION-KEY`。AES-128、SAMPLE-AES 都不做。项目约定不处理加密或 DRM。
+   - `#EXT-X-BYTERANGE`、`#EXT-X-GAP`、`#EXT-X-SKIP`、关键帧预览、图片清单、中途更换初始化段、看起来像 fMP4 但没有 MAP。广告打点标签忽略。
+3. **下载引擎**
+   - 长任务放在 `chrome.offscreen` 的文档里（`src/offscreen/`），不放在 service worker。因此 manifest 增加 `offscreen` 权限。
+   - 同时拉 4 片。每一片失败后再试 2 次。可以取消。进度是已下载片数 / 总片数，写在 `chrome.storage.session`，popup 关掉再打开还在。
+   - `fetch` 不设置 `headers`，不伪造 Referer，不用 `declarativeNetRequest`。`credentials: 'include'` 只带浏览器里已经有的 Cookie。
+4. **输出和内存**
+   - 按顺序拼成一个 Blob，再交给 `chrome.downloads`。文件名用现有的 `buildDownloadFilename`。
+   - 用带宽 × 时长估算体积。预计或实际超过 2GB 就拒绝，中文说明是为了避免占满内存，并且不保存半成品。
+   - 预计达到 512MB，或分片达到 300 个，先给中文警告，仍允许下载。
+   - 主清单里某条清晰度带了 `AUDIO` 组时，警告声音可能在另一条清单里。本次不合并音轨。
+5. **Popup**
+   - m3u8 上「复制」还在，旁边多一颗「下载」。mpd 仍然只有复制。
+   - 主清单先出清晰度选择，默认最高，再点「开始下载」。
+   - 下载中显示进度条和「取消」。失败显示可读的中文，例如 403、第几片缺失。
+
+解析和调度都不依赖 chrome，单测覆盖相对路径、主清单 / 媒体清单、加密拒绝、直播拒绝、重试、取消和体积上限。
+
+### V2-2 TS 转封装成 mp4（未做）
+
+V2-1 把 MPEG-TS 分片原样接成 `.ts`。播放器不一定愿意打开它。下一步评估用 [mux.js](https://github.com/videojs/mux.js)（或同类库）把 TS 转成 mp4：
+
+- 要确认 transmux 是否够用，还是必须重编码（扩展里不能跑 ffmpeg）。
+- 不连续点（`EXT-X-DISCONTINUITY`）的时间戳怎么接。
+- 转封装也在内存里，2GB 上限要一起算。
+- 这一步仍然不处理加密。
+
+### V2-3 DASH（mpd）与音视频合并的可行性（未做）
+
+mpd 继续只复制链接。下一步只做评估，不承诺能下：
+
+- mpd 里视频、音频常常是两条 Representation，各自有初始化段和一串 `.m4s`。
+- 要合成一个文件，需要解析 mp4 box、对齐时间轴，候选库是 mp4box.js 或 mux.js。分开的 HLS 音轨（`EXT-X-MEDIA`）是同一类问题。
+- 加密的 DASH（Widevine / PlayReady / CENC）不做。
+- 评估结论要写明：只拼接、能转封装，还是做不到。做不到就保持「仅复制」。
+
+### 这一步故意不做
+
+- 不解密，不绕 DRM，不伪造 Referer 或任何请求头。
+- 不下载直播。
+- 不把 TS 转成 mp4（V2-2）。
+- 不下载 mpd，也不把分开的音轨合并进视频（V2-3）。
+- 不在 service worker 里跑分片循环。

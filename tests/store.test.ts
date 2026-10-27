@@ -315,7 +315,7 @@ describe('去重与合并', () => {
         kind: 'hls',
         ext: 'm3u8',
         downloadable: false,
-        note: 'HLS 清单，仅支持复制链接',
+        note: 'HLS 清单，可下载未加密的点播',
       },
     ])
   })
