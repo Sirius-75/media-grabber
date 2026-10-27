@@ -6,7 +6,8 @@
  * 进度和保存文件通过 chrome.runtime 交给 service worker。
  * 这个页面除了 chrome.runtime，不使用别的扩展 API。
  * MPEG-TS 在保存前转封装成 mp4。转失败就仍保存原来的 .ts。
- * 带 EXT-X-MAP 的 fMP4 不再转一次。不设置请求头，也不伪造 Referer。
+ * 带 EXT-X-MAP 的 fMP4 不再转一次。fetch 不设置请求头。
+ * B 站分轨也在这里拉取。页面 Referer 由 service worker 在下载前准备好，这个页面不加请求头。
  */
 
 import { describeInterruptReason } from '../shared/interrupt-reason'
@@ -23,9 +24,13 @@ import {
   parseHlsPlaylist,
   type HlsPlaylist,
 } from '../shared/hls'
+import { BILIBILI_JOB_STORAGE_KEY, BILIBILI_OFFSCREEN, BILIBILI_PORT } from '../shared/bilibili'
+import type { BilibiliDownloadFile } from '../shared/bilibili'
 import { DASH_JOB_STORAGE_KEY } from '../shared/dash-job'
 import { HLS_JOB_STORAGE_KEY, toVariantChoice, type HlsJobRecord } from '../shared/hls-job'
+import type { BilibiliRole } from '../shared/types'
 import { abortDashInspect, inspectDash, startDashDownload, type DashHost } from './dash-task'
+import { runBilibiliDownload, type BilibiliHost, type BilibiliOutcome } from './bilibili-task'
 import { inspectFailureMessage, settleJob } from './failure'
 import { cancelStoredJob, putJob, saveBlobFile } from './runtime-bridge'
 
@@ -412,6 +417,114 @@ async function runDownload(request: DownloadRequest, controller: AbortController
   }
 }
 
+const BILIBILI_ROLES = new Set<BilibiliRole>(['video', 'audio', 'unknown', 'file'])
+
+function readBilibiliFiles(value: unknown): BilibiliDownloadFile[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined
+  const files: BilibiliDownloadFile[] = []
+  for (const entry of value) {
+    if (!isRecord(entry) || typeof entry.url !== 'string' || entry.url.trim() === '') return undefined
+    if (typeof entry.role !== 'string' || !BILIBILI_ROLES.has(entry.role as BilibiliRole)) return undefined
+    files.push({ url: entry.url.trim(), role: entry.role as BilibiliRole })
+  }
+  return files
+}
+
+function readBilibiliRequest(
+  value: Record<string, unknown>,
+): { key: string; files: BilibiliDownloadFile[]; title?: string; index?: number } | undefined {
+  if (typeof value.key !== 'string' || value.key.trim() === '') return undefined
+  const files = readBilibiliFiles(value.files)
+  if (!files) return undefined
+  const request: { key: string; files: BilibiliDownloadFile[]; title?: string; index?: number } = {
+    key: value.key.trim(),
+    files,
+  }
+  if (typeof value.title === 'string' && value.title.trim()) request.title = value.title
+  if (typeof value.index === 'number' && Number.isInteger(value.index) && value.index >= 1) request.index = value.index
+  return request
+}
+
+async function reportBilibili(key: string, result: BilibiliOutcome): Promise<void> {
+  try {
+    await chrome.runtime.sendMessage({
+      type: BILIBILI_OFFSCREEN.DONE,
+      key,
+      ok: result.ok,
+      cancelled: result.cancelled === true,
+      error: result.error,
+    })
+  } catch (error) {
+    warn('回报 B站 下载结果失败', error)
+  }
+}
+
+/** 整页共用一条连接。页面关掉时浏览器会断开它，不在每次下载结束时主动断开。 */
+let bilibiliPort: { disconnect(): void } | undefined
+
+function ensureBilibiliPort(): void {
+  if (bilibiliPort) return
+  const connect = chrome.runtime.connect
+  if (typeof connect !== 'function') return
+  try {
+    bilibiliPort = connect({ name: BILIBILI_PORT })
+  } catch {
+    bilibiliPort = undefined
+  }
+}
+
+const bilibiliHost: BilibiliHost = {
+  still(controller) {
+    return active?.controller === controller
+  },
+  clear(controller) {
+    if (active?.controller === controller) active = undefined
+  },
+  write(key, record, controller) {
+    return writeJob(key, record, controller, BILIBILI_JOB_STORAGE_KEY)
+  },
+}
+
+function startBilibiliDownload(request: {
+  key: string
+  files: BilibiliDownloadFile[]
+  title?: string
+  index?: number
+}): { ok: true } | { ok: false; error: string } {
+  if (active && active.key !== request.key) return { ok: false, error: HLS_TEXT.busy }
+  if (active?.key === request.key) active.controller.abort()
+  const controller = new AbortController()
+  activate(request.key, controller)
+  ensureBilibiliPort()
+  void runBilibiliDownload(request, controller, bilibiliHost)
+    .then((result) => {
+      // 同一条又开始了新的下载时，旧任务的结束不能把新任务报成完成。
+      if (active && active.controller !== controller) return undefined
+      return reportBilibili(request.key, result)
+    })
+    .catch((error: unknown) => {
+      warn('B站下载任务异常', error)
+      if (active && active.controller !== controller) return undefined
+      return reportBilibili(request.key, { ok: false, error: HLS_TEXT.offscreen })
+    })
+  return { ok: true }
+}
+
+function cancelBilibili(key: string): { ok: true } {
+  if (active?.key === key) {
+    active.controller.abort()
+    return { ok: true }
+  }
+  void enqueue(async () => {
+    try {
+      await cancelStoredJob(BILIBILI_JOB_STORAGE_KEY, key, ['downloading'])
+    } catch (error) {
+      warn('取消任务状态失败', error)
+    }
+  })
+  return { ok: true }
+}
+
 const dashHost: DashHost = {
   isActive(key) {
     return active?.key === key
@@ -534,6 +647,20 @@ export function startOffscreen(): void {
     if (message.type === 'DASH_OFFSCREEN_CANCEL') {
       if (typeof message.playlistUrl !== 'string') return undefined
       sendResponse(cancelDash(message.playlistUrl))
+      return undefined
+    }
+    if (message.type === BILIBILI_OFFSCREEN.DOWNLOAD) {
+      const request = readBilibiliRequest(message)
+      if (!request) {
+        sendResponse({ ok: false, error: '下载请求无效' })
+        return undefined
+      }
+      sendResponse(startBilibiliDownload(request))
+      return undefined
+    }
+    if (message.type === BILIBILI_OFFSCREEN.CANCEL) {
+      if (typeof message.key !== 'string' || message.key.trim() === '') return undefined
+      sendResponse(cancelBilibili(message.key.trim()))
       return undefined
     }
     if (message.type === 'DASH_OFFSCREEN_SYNC' || message.type === 'HLS_OFFSCREEN_SYNC') {

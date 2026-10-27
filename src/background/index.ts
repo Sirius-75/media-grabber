@@ -6,7 +6,9 @@
  * DOWNLOAD 在 download.ts 里处理：直链交给 chrome.downloads，不改请求头。
  * HLS 和 DASH 的分片下载都转给 offscreen document，不在 service worker 里拼接。
  * offscreen 只拉取和拼接。进度写入和 chrome.downloads 由 service worker 完成。
+ * B 站分轨的 Referer 会话规则只在这里加、也只在这里删。offscreen 的 fetch 不加请求头。
  */
+import { clearBilibiliRefererOnStartup, listenForBilibili } from './bilibili'
 import { listenForDash } from './dash'
 import { listenForDownload } from './download'
 import { listenForHls } from './hls'
@@ -19,6 +21,8 @@ listenForDownload()
 listenForOffscreenJobs()
 listenForHls()
 listenForDash()
+listenForBilibili()
+void clearBilibiliRefererOnStartup()
 
 startSniffer(
   (tabId, item) => {

@@ -7,6 +7,7 @@
 import { normalizeUrl } from '../shared/classify'
 import { HLS_TEXT, isHttpUrl } from '../shared/hls'
 import { readOffscreenActiveKey } from '../shared/offscreen-bridge'
+import { noteBilibiliOffscreen } from './bilibili-rules'
 import { syncStoredJobs } from './offscreen-jobs'
 import {
   isHlsCancelMessage,
@@ -151,6 +152,8 @@ export async function relayJobSync(): Promise<{ ok: true }> {
   } catch (error) {
     warn('写入中断状态失败', error)
   }
+  // B 站规则只在这条任务还在 offscreen 里时保留。同步发现它已经不在，就删掉。
+  noteBilibiliOffscreen(activeKey)
   return { ok: true }
 }
 

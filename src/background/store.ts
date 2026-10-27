@@ -12,12 +12,14 @@
  * DOWNLOAD 由 download.ts 回复，这里不处理。
  */
 
+import { preferBilibiliMeta, readBilibiliMeta } from '../shared/bilibili'
 import { classify, normalizeUrl } from '../shared/classify'
 import { isBlocked } from '../shared/blocklist'
 import { isClearMediaMessage, isGetMediaMessage, isMediaFoundMessage } from '../shared/messages'
 import {
   MEDIA_KINDS,
   MEDIA_SOURCES,
+  type BilibiliMeta,
   type MediaItem,
   type MediaItemDraft,
   type MediaKind,
@@ -87,7 +89,9 @@ function isMediaItem(value: unknown): value is MediaItem {
 }
 
 function cloneItem(item: MediaItem): MediaItem {
-  return { ...item, sources: [...item.sources] }
+  const copy: MediaItem = { ...item, sources: [...item.sources] }
+  if (item.bilibili) copy.bilibili = { ...item.bilibili }
+  return copy
 }
 
 /**
@@ -118,7 +122,12 @@ async function readItems(tabId: number): Promise<MediaItem[]> {
   if (!Array.isArray(value)) return []
   const items: MediaItem[] = []
   for (const entry of value) {
-    if (isMediaItem(entry)) items.push(cloneItem(entry))
+    if (!isMediaItem(entry)) continue
+    const item = cloneItem(entry)
+    const meta = readBilibiliMeta(entry.bilibili)
+    if (meta) item.bilibili = meta
+    else delete item.bilibili
+    items.push(item)
   }
   return items
 }
@@ -185,6 +194,7 @@ function buildItem(fields: {
   size?: number
   note?: string
   frameUrl?: string
+  bilibili?: BilibiliMeta
 }): MediaItem {
   const item: MediaItem = {
     url: fields.url,
@@ -198,6 +208,7 @@ function buildItem(fields: {
   if (fields.size !== undefined) item.size = fields.size
   if (fields.note !== undefined) item.note = fields.note
   if (fields.frameUrl !== undefined) item.frameUrl = fields.frameUrl
+  if (fields.bilibili) item.bilibili = { ...fields.bilibili }
   return item
 }
 
@@ -216,35 +227,41 @@ function toMediaItem(draft: MediaItemDraft, now: number): MediaItem | null {
   const firstSeen =
     typeof draft.firstSeen === 'number' && Number.isFinite(draft.firstSeen) ? draft.firstSeen : now
   const sources = Array.isArray(draft.sources) ? draft.sources : []
+  const bilibili = readBilibiliMeta(draft.bilibili)
 
   return buildItem({
     url,
     kind,
     sources: unionSources(sources, []),
-    downloadable: draft.downloadable ?? classified?.downloadable ?? false,
+    // 带 B 站信息的地址必须走 Referer 下载，不能交给普通直链。
+    downloadable: bilibili ? false : (draft.downloadable ?? classified?.downloadable ?? false),
     firstSeen,
     ext: cleanExt(draft.ext) ?? classified?.ext,
     mime: mime ?? classified?.mime,
     size: cleanSize(draft.size),
     note: cleanText(draft.note) ?? classified?.note,
     frameUrl: cleanText(draft.frameUrl),
+    bilibili,
   })
 }
 
-/** 只补空缺。kind、downloadable 和已经写过的 size 保持先到的那次。 */
+/** 只补空缺。kind、downloadable 和已经写过的 size 保持先到的那次。类型未知的 B 站条目可以被页面信息补全。 */
 function mergeItems(existing: MediaItem, incoming: MediaItem): MediaItem {
   const firstSeen = Math.min(existing.firstSeen, incoming.firstSeen)
+  const bilibili = preferBilibiliMeta(existing.bilibili, incoming.bilibili)
+  const upgraded = existing.bilibili?.role === 'unknown' && bilibili !== undefined && bilibili.role !== 'unknown'
   return buildItem({
     url: existing.url,
-    kind: existing.kind,
+    kind: upgraded ? incoming.kind : existing.kind,
     sources: unionSources(existing.sources, incoming.sources),
-    downloadable: existing.downloadable,
+    downloadable: bilibili ? false : existing.downloadable,
     firstSeen,
-    ext: existing.ext ?? incoming.ext,
+    ext: upgraded ? (incoming.ext ?? existing.ext) : (existing.ext ?? incoming.ext),
     mime: existing.mime ?? incoming.mime,
     size: existing.size ?? incoming.size,
-    note: existing.note ?? incoming.note,
+    note: upgraded ? (incoming.note ?? existing.note) : (existing.note ?? incoming.note),
     frameUrl: existing.frameUrl ?? incoming.frameUrl,
+    bilibili,
   })
 }
 

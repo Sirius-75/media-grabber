@@ -6,6 +6,7 @@
  * 清空发 CLEAR_MEDIA。这里不改嗅探。
  */
 
+import { BILIBILI_JOB_STORAGE_KEY, BILIBILI_TEXT } from '../shared/bilibili'
 import { normalizeUrl } from '../shared/classify'
 import { DASH_JOB_STORAGE_KEY, readDashJobMap } from '../shared/dash-job'
 import {
@@ -24,6 +25,7 @@ import {
 } from '../shared/hls-job'
 import {
   MESSAGE_TYPE,
+  type BilibiliDownloadMessage,
   type DashDownloadMessage,
   type DashInspectMessage,
   type DownloadMessage,
@@ -52,6 +54,7 @@ let items: MediaItem[] = []
 let statuses: DownloadStatusMap = {}
 let jobs: HlsJobMap = {}
 let dashJobs: HlsJobMap = {}
+let bilibiliJobs: HlsJobMap = {}
 /** 用户在清晰度列表里点过的地址。DASH 里存的是 Representation id。重画时不要跳回默认项。 */
 const preferredVariant = new Map<string, string>()
 
@@ -75,7 +78,7 @@ function paint(): void {
 
   countEl.textContent = `共 ${items.length} 条`
   clearButton.disabled = tabId === undefined || items.length === 0
-  renderList(listEl, items, statuses, jobs, preferredVariant, dashJobs)
+  renderList(listEl, items, statuses, jobs, preferredVariant, dashJobs, bilibiliJobs)
   const isEmpty = items.length === 0
   emptyEl.hidden = !isEmpty
   listEl.hidden = isEmpty
@@ -155,10 +158,12 @@ async function readSession(): Promise<void> {
     DOWNLOAD_STATUS_STORAGE_KEY,
     HLS_JOB_STORAGE_KEY,
     DASH_JOB_STORAGE_KEY,
+    BILIBILI_JOB_STORAGE_KEY,
   ])
   statuses = readDownloadStatusMap(stored[DOWNLOAD_STATUS_STORAGE_KEY])
   jobs = readHlsJobMap(stored[HLS_JOB_STORAGE_KEY])
   dashJobs = readDashJobMap(stored[DASH_JOB_STORAGE_KEY])
+  bilibiliJobs = readHlsJobMap(stored[BILIBILI_JOB_STORAGE_KEY])
 }
 
 function rememberJob(url: string, record: Omit<HlsJobRecord, 'updatedAt'>): void {
@@ -193,6 +198,7 @@ function onStorageChanged(
   let nextStatuses = statuses
   let nextJobs = jobs
   let nextDash = dashJobs
+  let nextBilibili = bilibiliJobs
   let changed = false
   if (DOWNLOAD_STATUS_STORAGE_KEY in changes) {
     const parsed = readDownloadStatusMap(changes[DOWNLOAD_STATUS_STORAGE_KEY]?.newValue)
@@ -215,10 +221,18 @@ function onStorageChanged(
       changed = true
     }
   }
+  if (BILIBILI_JOB_STORAGE_KEY in changes) {
+    const parsed = readHlsJobMap(changes[BILIBILI_JOB_STORAGE_KEY]?.newValue)
+    if (!sameJobs(bilibiliJobs, parsed)) {
+      nextBilibili = parsed
+      changed = true
+    }
+  }
   if (!changed) return
   statuses = nextStatuses
   jobs = nextJobs
   dashJobs = nextDash
+  bilibiliJobs = nextBilibili
   paint()
 }
 
@@ -412,6 +426,46 @@ async function cancelDashDownload(url: string): Promise<void> {
   }
 }
 
+function rememberBilibili(url: string, record: Omit<HlsJobRecord, 'updatedAt'>): void {
+  bilibiliJobs = {
+    ...bilibiliJobs,
+    [statusKey(url)]: { ...record, updatedAt: Date.now() },
+  }
+}
+
+async function requestBilibiliDownload(url: string, withAudio: boolean): Promise<void> {
+  rememberBilibili(url, { phase: 'downloading', message: BILIBILI_TEXT.preparing, completed: 0, total: 0 })
+  paint()
+  const message: BilibiliDownloadMessage = { type: MESSAGE_TYPE.BILIBILI_DOWNLOAD, url, withAudio }
+  if (tabId !== undefined) message.tabId = tabId
+  try {
+    const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))
+    if (!response || response.ok === false) {
+      rememberBilibili(url, {
+        phase: 'failed',
+        message: response && response.ok === false ? response.error : HLS_TEXT.offscreen,
+        completed: 0,
+        total: 0,
+      })
+      paint()
+    }
+  } catch {
+    rememberBilibili(url, { phase: 'failed', message: HLS_TEXT.offscreen, completed: 0, total: 0 })
+    paint()
+  }
+}
+
+async function cancelBilibiliDownload(url: string): Promise<void> {
+  rememberBilibili(url, { phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0 })
+  paint()
+  try {
+    await chrome.runtime.sendMessage({ type: MESSAGE_TYPE.BILIBILI_CANCEL, url })
+  } catch {
+    rememberBilibili(url, { phase: 'failed', message: '取消失败，请再试一次', completed: 0, total: 0 })
+    paint()
+  }
+}
+
 async function cancelHlsDownload(url: string): Promise<void> {
   rememberJob(url, { phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0 })
   paint()
@@ -499,10 +553,12 @@ async function load(): Promise<void> {
       statuses = {}
       jobs = {}
       dashJobs = {}
+      bilibiliJobs = {}
     }
     paint()
     void chrome.runtime.sendMessage({ type: MESSAGE_TYPE.HLS_SYNC }).catch(() => undefined)
     void chrome.runtime.sendMessage({ type: MESSAGE_TYPE.DASH_SYNC }).catch(() => undefined)
+    void chrome.runtime.sendMessage({ type: MESSAGE_TYPE.BILIBILI_SYNC }).catch(() => undefined)
   } catch {
     items = []
     paint()
@@ -547,6 +603,15 @@ function start(): void {
     },
     onDashVariant(url, representationId) {
       preferredVariant.set(url, representationId)
+    },
+    onBilibiliDownload(url) {
+      void requestBilibiliDownload(url, false)
+    },
+    onBilibiliWithAudio(url) {
+      void requestBilibiliDownload(url, true)
+    },
+    onBilibiliCancel(url) {
+      void cancelBilibiliDownload(url)
     },
   })
   chrome.storage.onChanged.addListener(onStorageChanged)

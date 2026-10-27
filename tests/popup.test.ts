@@ -480,6 +480,55 @@ describe('DASH 下载界面', () => {
   })
 })
 
+describe('B 站分轨按钮（示例数据）', () => {
+  it('视频和音频分开下载，不出现普通直链按钮', () => {
+    const list = document.createElement('ul')
+    document.body.append(list)
+    const video = item({
+      url: 'https://cdn.example.test/example-data/v.m4s',
+      kind: 'video',
+      ext: 'm4s',
+      downloadable: false,
+      note: '分开保存',
+      bilibili: { role: 'video', label: 'B站视频 1080P · AVC', bandwidth: 1 },
+    })
+    const audio = item({
+      url: 'https://cdn.example.test/example-data/a.m4s',
+      kind: 'audio',
+      ext: 'm4s',
+      downloadable: false,
+      bilibili: { role: 'audio', label: 'B站音频 192kbps', bandwidth: 192000 },
+    })
+    const downloads: Array<{ url: string; withAudio: boolean }> = []
+    renderList(list, [video, audio])
+    bindListActions(list, () => [video, audio], {
+      onCopy: () => undefined,
+      onDownload: () => undefined,
+      onBilibiliDownload(url) {
+        downloads.push({ url, withAudio: false })
+      },
+      onBilibiliWithAudio(url) {
+        downloads.push({ url, withAudio: true })
+      },
+    })
+    expect(list.querySelector('[data-action="download"]')).toBeNull()
+    expect(list.querySelector('.tag-bilibili')?.textContent).toBe('B站视频 1080P · AVC')
+    expect([...list.querySelectorAll('button')].map((button) => button.textContent)).toEqual([
+      '复制',
+      '下载视频',
+      '下载视频+音频',
+      '复制',
+      '下载音频',
+    ])
+    list.querySelector<HTMLButtonElement>('[data-action="bilibili-with-audio"]')?.click()
+    list.querySelector<HTMLButtonElement>('[data-action="bilibili-download"]')?.click()
+    expect(downloads).toEqual([
+      { url: video.url, withAudio: true },
+      { url: video.url, withAudio: false },
+    ])
+  })
+})
+
 describe('样式约束', () => {
   it('宽度固定在 420px，列表纵向滚动，不出现横向滚动条', () => {
     const css = readFileSync(join(process.cwd(), 'src/popup/style.css'), 'utf8')

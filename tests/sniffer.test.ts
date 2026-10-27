@@ -348,6 +348,35 @@ describe('startSniffer', () => {
     })
   })
 
+  it('B 站 CDN 上的 .m4s 只列一次，普通分片仍然忽略（示例数据）', () => {
+    const addListener = vi.fn()
+    vi.stubGlobal('chrome', {
+      webRequest: { onHeadersReceived: { addListener } },
+    })
+    const onFound = vi.fn()
+    const onSize = vi.fn()
+    startSniffer(onFound, onSize)
+    const listener = addListener.mock.calls[0][0] as (details: ResponseDetails) => void
+    const file = 'https://upos-example.bilivideo.com/example-data/clip.m4s?deadline=9&platform=pc'
+    const headers = [
+      { name: 'Content-Type', value: 'video/mp4' },
+      { name: 'Content-Length', value: '1024' },
+      { name: 'Content-Range', value: 'bytes 0-1023/4096' },
+    ]
+    listener(response({ url: `${file}&range=0-1023`, statusCode: 206, responseHeaders: headers }))
+    listener(response({ url: `${file}&range=1024-2047`, statusCode: 206, responseHeaders: headers }))
+    listener(response({ url: 'https://cdn.example/seg/1.m4s', statusCode: 200 }))
+    expect(onSize).not.toHaveBeenCalled()
+    expect(onFound).toHaveBeenCalledTimes(1)
+    expect(onFound.mock.calls[0][1]).toMatchObject({
+      url: file,
+      size: 4096,
+      downloadable: false,
+      bilibili: { role: 'unknown', label: 'B站 m4s 分轨文件' },
+    })
+    expect(onFound.mock.calls[0][1].note).toContain('类型未知')
+  })
+
   it('不传 onSize 时 206 被忽略', () => {
     const addListener = vi.fn()
     vi.stubGlobal('chrome', {

@@ -4,6 +4,7 @@
  * 其它 frame 由 all_frames 各自注入，这里不碰 iframe.contentDocument。
  */
 
+import { draftFromTrack, parsePlayinfoScripts, preferBilibiliMeta } from '../shared/bilibili'
 import { classify, normalizeUrl, type MediaClassification } from '../shared/classify'
 import { MESSAGE_TYPE } from '../shared/messages'
 import type { MediaItemDraft, MediaKind } from '../shared/types'
@@ -229,6 +230,8 @@ function itemSignature(item: MediaItemDraft): string {
     item.note ?? null,
     item.frameUrl ?? null,
     item.sources ?? null,
+    item.bilibili?.role ?? null,
+    item.bilibili?.label ?? null,
   ])
 }
 
@@ -244,7 +247,23 @@ function collectMediaItems(doc: Document, options: CollectOptions): MediaItemDra
       consider(found, readReflectedSrc(source), kind, mimeHint(source), options)
     }
   }
+  // 隔离世界读不到 window.__playinfo__，所以只解析 script 文本。失败的脚本跳过。
+  for (const track of parsePlayinfoScripts(playinfoScriptTexts(doc))) {
+    const draft = draftFromTrack(track, options)
+    const existing = found.get(draft.url)
+    found.set(draft.url, existing ? mergeDraft(existing, draft) : draft)
+  }
   return [...found.values()]
+}
+
+function playinfoScriptTexts(doc: Document): string[] {
+  const texts: string[] = []
+  for (const node of doc.querySelectorAll('script')) {
+    const text = node.textContent ?? ''
+    if (!text.includes('__playinfo__')) continue
+    texts.push(text)
+  }
+  return texts
 }
 
 function consider(
@@ -300,6 +319,8 @@ function mergeDraft(current: MediaItemDraft, extra: MediaItemDraft): MediaItemDr
   if (!merged.note && extra.note) merged.note = extra.note
   if (!merged.frameUrl && extra.frameUrl) merged.frameUrl = extra.frameUrl
   if (extra.downloadable === false) merged.downloadable = false
+  const bilibili = preferBilibiliMeta(current.bilibili, extra.bilibili)
+  if (bilibili) merged.bilibili = bilibili
   return merged
 }
 
@@ -388,10 +409,20 @@ function mutationTouchesMedia(record: MutationRecord): boolean {
   if (record.type !== 'childList') return false
   if (isVideoOrAudio(record.target)) return true
   for (const node of record.addedNodes) {
-    if (nodeContainsMedia(node)) return true
+    if (nodeContainsMedia(node) || nodeHasPlayinfoScript(node)) return true
   }
   for (const node of record.removedNodes) {
     if (nodeContainsMedia(node)) return true
+  }
+  return false
+}
+
+function nodeHasPlayinfoScript(node: Node): boolean {
+  if (!(node instanceof Element)) return false
+  if (node.localName === 'script') return (node.textContent ?? '').includes('__playinfo__')
+  if (typeof node.querySelectorAll !== 'function') return false
+  for (const script of node.querySelectorAll('script')) {
+    if ((script.textContent ?? '').includes('__playinfo__')) return true
   }
   return false
 }

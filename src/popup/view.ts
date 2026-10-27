@@ -14,7 +14,7 @@ import {
 import { formatBytes } from '../shared/format'
 import { DASH_NOTE } from '../shared/dash-text'
 import type { HlsJobMap, HlsJobPhase, HlsJobRecord } from '../shared/hls-job'
-import type { MediaItem, MediaKind } from '../shared/types'
+import type { BilibiliRole, MediaItem, MediaKind } from '../shared/types'
 
 /** 单行里大约能放下的字符数。更长的地址用省略号截断，悬停仍看全文。 */
 export const URL_VISIBLE_CHARS = 52
@@ -88,6 +88,19 @@ export function canOfferDashDownload(item: Pick<MediaItem, 'url' | 'kind'>): boo
   if (item.kind !== 'dash') return false
   const scheme = schemeOf(item.url)
   return scheme === 'http' || scheme === 'https'
+}
+
+/** B 站分轨不走普通直链，单独一颗按钮。 */
+export function canOfferBilibiliDownload(item: Pick<MediaItem, 'url' | 'bilibili'>): boolean {
+  if (!item.bilibili?.label) return false
+  const scheme = schemeOf(item.url)
+  return scheme === 'http' || scheme === 'https'
+}
+
+function bilibiliButtonText(role: BilibiliRole): string {
+  if (role === 'audio') return '下载音频'
+  if (role === 'unknown') return '下载'
+  return '下载视频'
 }
 
 /** 不可下载时给一句说明。条目自带 note 时优先用它。 */
@@ -204,6 +217,9 @@ export interface ListActions {
   onDashStart?: (url: string, mediaUrl: string, button: HTMLButtonElement) => void
   onDashCancel?: (url: string, button: HTMLButtonElement) => void
   onDashVariant?: (url: string, mediaUrl: string) => void
+  onBilibiliDownload?: (url: string, button: HTMLButtonElement) => void
+  onBilibiliWithAudio?: (url: string, button: HTMLButtonElement) => void
+  onBilibiliCancel?: (url: string, button: HTMLButtonElement) => void
 }
 
 /** 把当前列表画进 ul。调用方保留 ul 上的点击监听，这里只换子节点。 */
@@ -214,7 +230,9 @@ export function renderList(
   jobs?: HlsJobMap,
   preferredVariant?: ReadonlyMap<string, string>,
   dashJobs?: HlsJobMap,
+  bilibiliJobs?: HlsJobMap,
 ): void {
+  const pairAudio = items.some((item) => item.bilibili?.role === 'audio')
   const rows = items.map((item, index) =>
     renderItem(
       item,
@@ -223,6 +241,8 @@ export function renderList(
       hlsJobForItem(item, jobs),
       preferredVariant?.get(item.url),
       hlsJobForItem(item, dashJobs),
+      hlsJobForItem(item, bilibiliJobs),
+      pairAudio,
     ),
   )
   list.replaceChildren(...rows)
@@ -262,6 +282,9 @@ export function bindListActions(
       const mediaUrl = select instanceof HTMLSelectElement ? select.value : ''
       actions.onDashStart?.(item.url, mediaUrl, button)
     }
+    if (button.dataset.action === 'bilibili-download') actions.onBilibiliDownload?.(item.url, button)
+    if (button.dataset.action === 'bilibili-with-audio') actions.onBilibiliWithAudio?.(item.url, button)
+    if (button.dataset.action === 'bilibili-cancel') actions.onBilibiliCancel?.(item.url, button)
   })
   list.addEventListener('change', (event) => {
     const select = event.target
@@ -304,6 +327,8 @@ function renderItem(
   hlsJob: HlsJobRecord | undefined,
   preferredMediaUrl: string | undefined,
   dashJob: HlsJobRecord | undefined,
+  bilibiliJob: HlsJobRecord | undefined,
+  pairAudio: boolean,
 ): HTMLLIElement {
   const row = document.createElement('li')
   row.className = 'item'
@@ -314,7 +339,8 @@ function renderItem(
 
   const kind = document.createElement('span')
   kind.className = `tag tag-${item.kind}`
-  kind.textContent = kindLabel(item.kind)
+  if (item.bilibili) kind.classList.add('tag-bilibili')
+  kind.textContent = item.bilibili?.label.trim() || kindLabel(item.kind)
 
   const size = document.createElement('span')
   size.className = 'size'
@@ -340,7 +366,7 @@ function renderItem(
     : canOfferDashDownload(item)
       ? { job: dashJob, action: 'dash' as const }
       : undefined
-  const hls = segment?.job
+  const hls = segment?.job ?? (canOfferBilibiliDownload(item) ? bilibiliJob : undefined)
   // 下载进行中时，进度和失败原因已经说明状态，不再重复清单说明。
   if (!hls || hls.phase === 'picking') {
     const note = itemNote(item)
@@ -431,6 +457,31 @@ function renderItem(
       download.dataset.action = `${prefix}-download`
       download.textContent = '下载'
       actions.append(download)
+    }
+  }
+
+  if (!segment && canOfferBilibiliDownload(item) && item.bilibili) {
+    const busy = hls?.phase === 'downloading' || hls?.phase === 'inspecting'
+    if (busy) {
+      const cancel = document.createElement('button')
+      cancel.type = 'button'
+      cancel.dataset.action = 'bilibili-cancel'
+      cancel.textContent = '取消'
+      actions.append(cancel)
+    } else {
+      const download = document.createElement('button')
+      download.type = 'button'
+      download.className = 'bilibili-download'
+      download.dataset.action = 'bilibili-download'
+      download.textContent = bilibiliButtonText(item.bilibili.role)
+      actions.append(download)
+      if (pairAudio && (item.bilibili.role === 'video' || item.bilibili.role === 'file')) {
+        const both = document.createElement('button')
+        both.type = 'button'
+        both.dataset.action = 'bilibili-with-audio'
+        both.textContent = '下载视频+音频'
+        actions.append(both)
+      }
     }
   }
 

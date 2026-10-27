@@ -5,6 +5,9 @@ import {
   isDownloadMessage,
   isExtensionMessage,
   isGetMediaMessage,
+  isBilibiliCancelMessage,
+  isBilibiliDownloadMessage,
+  isBilibiliSyncMessage,
   isDashCancelMessage,
   isDashDownloadMessage,
   isDashInspectMessage,
@@ -31,6 +34,9 @@ describe('消息常量', () => {
       DASH_DOWNLOAD: 'DASH_DOWNLOAD',
       DASH_CANCEL: 'DASH_CANCEL',
       DASH_SYNC: 'DASH_SYNC',
+      BILIBILI_DOWNLOAD: 'BILIBILI_DOWNLOAD',
+      BILIBILI_CANCEL: 'BILIBILI_CANCEL',
+      BILIBILI_SYNC: 'BILIBILI_SYNC',
     })
   })
 })
@@ -234,6 +240,32 @@ describe('DASH 消息', () => {
   })
 })
 
+describe('B 站消息', () => {
+  it('接受下载、取消和同步', () => {
+    expect(
+      isBilibiliDownloadMessage({
+        type: MESSAGE_TYPE.BILIBILI_DOWNLOAD,
+        url: 'https://cdn.example.test/example-data/v.m4s',
+        tabId: 2,
+        withAudio: true,
+      }),
+    ).toBe(true)
+    expect(isBilibiliDownloadMessage({ type: MESSAGE_TYPE.BILIBILI_DOWNLOAD, url: '  ' })).toBe(false)
+    expect(
+      isBilibiliDownloadMessage({
+        type: MESSAGE_TYPE.BILIBILI_DOWNLOAD,
+        url: 'https://cdn.example.test/example-data/v.m4s',
+        withAudio: 'yes',
+      }),
+    ).toBe(false)
+    expect(isBilibiliCancelMessage({ type: MESSAGE_TYPE.BILIBILI_CANCEL, url: 'https://cdn.example.test/a.m4s' })).toBe(
+      true,
+    )
+    expect(isBilibiliSyncMessage({ type: MESSAGE_TYPE.BILIBILI_SYNC })).toBe(true)
+    expect(isBilibiliSyncMessage({ type: MESSAGE_TYPE.BILIBILI_CANCEL })).toBe(false)
+  })
+})
+
 describe('isExtensionMessage', () => {
   it('协议里的消息都能通过，其它值不行', () => {
     expect(isExtensionMessage({ type: MESSAGE_TYPE.MEDIA_FOUND, items: [] })).toBe(true)
@@ -253,6 +285,14 @@ describe('isExtensionMessage', () => {
       }),
     ).toBe(true)
     expect(isExtensionMessage({ type: MESSAGE_TYPE.DASH_SYNC })).toBe(true)
+    expect(
+      isExtensionMessage({
+        type: MESSAGE_TYPE.BILIBILI_DOWNLOAD,
+        url: 'https://cdn.example.test/example-data/v.m4s',
+        withAudio: false,
+      }),
+    ).toBe(true)
+    expect(isExtensionMessage({ type: MESSAGE_TYPE.BILIBILI_SYNC })).toBe(true)
     expect(isExtensionMessage({ type: 'NOPE' })).toBe(false)
     expect(isExtensionMessage(undefined)).toBe(false)
   })

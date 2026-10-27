@@ -11,8 +11,8 @@ import {
 
 describe('release 路径', () => {
   it('用版本号生成 zip 文件名', () => {
-    expect(releaseZipPath(path.join('repo'), '0.2.0')).toBe(
-      path.join('repo', 'release', 'media-grabber-0.2.0.zip'),
+    expect(releaseZipPath(path.join('repo'), '0.2.1')).toBe(
+      path.join('repo', 'release', 'media-grabber-0.2.1.zip'),
     )
   })
 
@@ -29,20 +29,20 @@ describe('manifest 检查', () => {
       assertPackableManifest({
         name: 'Media Grabber',
         description: '识别当前页面里的音视频资源，供复制或下载。仅供个人自用。',
-        version: '0.2.0',
+        version: '0.2.1',
       }),
     ).not.toThrow()
   })
 
   it('空字段、过长说明、非法版本都会被拒绝', () => {
-    expect(() => assertPackableManifest({ name: '  ', description: '说明', version: '0.2.0' })).toThrow(
+    expect(() => assertPackableManifest({ name: '  ', description: '说明', version: '0.2.1' })).toThrow(
       /name/,
     )
     expect(() =>
       assertPackableManifest({
         name: 'Media Grabber',
         description: '字'.repeat(133),
-        version: '0.2.0',
+        version: '0.2.1',
       }),
     ).toThrow(/132/)
     expect(() =>
@@ -66,7 +66,7 @@ describe('zip 目录', () => {
       await writeFile(path.join(src, 'icons', 'icon.txt'), 'icon')
       await writeFile(path.join(src, 'src', 'popup', 'index.html'), '<p>hi</p>')
 
-      const out = path.join(root, 'release', 'media-grabber-0.2.0.zip')
+      const out = path.join(root, 'release', 'media-grabber-0.2.1.zip')
       const result = await zipDirectory(src, out)
       expect(result.fileCount).toBe(3)
 
