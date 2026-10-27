@@ -15,8 +15,14 @@
  * 206 的 Content-Length 是这一段的字节数，不一定是整文件；方案已说明这时大小可能不准。
  * 这里不解析 Content-Range，也不另发请求。
  * 本文件不读写 storage。入口把 onFound 接到 addMedia，把 onSize 接到 fillMediaSize。
+ * 普通 .m4s 仍然不是一条新媒体。只有 B 站 CDN 上的单个 .m4s 会进列表，
+ * 并且同一个文件的多次 Range 请求只上报一次。这不改请求，也不加 Referer。
  */
 
+/** 同一个标签页里，规范化后的 B 站 .m4s 只上报一次。 */
+const seenBilibiliM4s = new Set<string>()
+
+import { bilibiliM4sItem } from '../shared/bilibili'
 import { classify, normalizeUrl } from '../shared/classify'
 import type { MediaItem } from '../shared/types'
 
@@ -154,13 +160,31 @@ function viewOf(details: chrome.webRequest.OnHeadersReceivedDetails): ResponseDe
  * onFound 只接收新媒体。onSize 可不传；不传时 206 被忽略，不会误新增。
  * 监听回调固定返回 undefined，不提供 BlockingResponse。
  */
+function rememberBilibiliM4s(tabId: number, url: string): boolean {
+  const key = `${tabId}\n${url}`
+  if (seenBilibiliM4s.has(key)) return false
+  seenBilibiliM4s.add(key)
+  if (seenBilibiliM4s.size > 500) {
+    const oldest = seenBilibiliM4s.values().next().value
+    if (oldest) seenBilibiliM4s.delete(oldest)
+  }
+  return true
+}
+
 export function startSniffer(
   onFound: (tabId: number, item: MediaItem) => void,
   onSize?: (tabId: number, url: string, size: number) => void,
 ): void {
+  seenBilibiliM4s.clear()
   chrome.webRequest.onHeadersReceived.addListener(
     (details) => {
       const view = viewOf(details)
+      const bilibili = bilibiliM4sItem(view)
+      if (bilibili) {
+        // 206 的 Content-Length 是这一段的大小，不能拿去补文件大小。
+        if (rememberBilibiliM4s(view.tabId, bilibili.url)) onFound(view.tabId, bilibili)
+        return undefined
+      }
       const sizeUpdate = readSizeUpdate(view)
       if (sizeUpdate) {
         onSize?.(sizeUpdate.tabId, sizeUpdate.url, sizeUpdate.size)

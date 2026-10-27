@@ -4,6 +4,7 @@
  */
 
 import { describeInterruptReason } from '../shared/interrupt-reason'
+import { BILIBILI_JOB_STORAGE_KEY } from '../shared/bilibili'
 import { DASH_JOB_STORAGE_KEY } from '../shared/dash-job'
 import { HLS_TEXT } from '../shared/hls'
 import { HLS_JOB_STORAGE_KEY, readHlsJobMap, trimHlsJobs, type HlsJobMap, type HlsJobRecord } from '../shared/hls-job'
@@ -18,6 +19,7 @@ import {
 
 const HLS_ACTIVE_PHASES = new Set(['downloading', 'inspecting', 'remuxing'])
 const DASH_ACTIVE_PHASES = new Set(['downloading', 'inspecting'])
+const BILIBILI_ACTIVE_PHASES = new Set(['downloading'])
 
 type Ack = { ok: true } | { ok: false; error: string }
 
@@ -111,6 +113,7 @@ export function syncStoredJobs(activeKey?: string): Promise<void> {
   return enqueue(async () => {
     await interrupt(HLS_JOB_STORAGE_KEY, HLS_ACTIVE_PHASES, activeKey)
     await interrupt(DASH_JOB_STORAGE_KEY, DASH_ACTIVE_PHASES, activeKey)
+    await interrupt(BILIBILI_JOB_STORAGE_KEY, BILIBILI_ACTIVE_PHASES, activeKey)
   })
 }
 

@@ -4,6 +4,7 @@
  * 这个文件不访问浏览器 API。
  */
 
+import { BILIBILI_JOB_STORAGE_KEY } from './bilibili'
 import { DASH_JOB_STORAGE_KEY } from './dash-job'
 import { HLS_JOB_PHASES, HLS_JOB_STORAGE_KEY, type HlsJobPhase } from './hls-job'
 
@@ -15,8 +16,10 @@ export const OFFSCREEN_BRIDGE = {
 
 const PHASES = new Set<string>(HLS_JOB_PHASES)
 
-export function isJobStorageKey(value: unknown): value is typeof HLS_JOB_STORAGE_KEY | typeof DASH_JOB_STORAGE_KEY {
-  return value === HLS_JOB_STORAGE_KEY || value === DASH_JOB_STORAGE_KEY
+export function isJobStorageKey(
+  value: unknown,
+): value is typeof HLS_JOB_STORAGE_KEY | typeof DASH_JOB_STORAGE_KEY | typeof BILIBILI_JOB_STORAGE_KEY {
+  return value === HLS_JOB_STORAGE_KEY || value === DASH_JOB_STORAGE_KEY || value === BILIBILI_JOB_STORAGE_KEY
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

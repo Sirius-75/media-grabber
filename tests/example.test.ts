@@ -17,6 +17,7 @@ describe('manifest', () => {
       'tabs',
       'clipboardWrite',
       'offscreen',
+      'declarativeNetRequestWithHostAccess',
     ])
     expect(manifest.host_permissions).toEqual(['<all_urls>'])
     expect(manifest.background).toMatchObject({

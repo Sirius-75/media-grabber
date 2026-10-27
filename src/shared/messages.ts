@@ -25,6 +25,9 @@ export const MESSAGE_TYPE = {
   DASH_DOWNLOAD: 'DASH_DOWNLOAD',
   DASH_CANCEL: 'DASH_CANCEL',
   DASH_SYNC: 'DASH_SYNC',
+  BILIBILI_DOWNLOAD: 'BILIBILI_DOWNLOAD',
+  BILIBILI_CANCEL: 'BILIBILI_CANCEL',
+  BILIBILI_SYNC: 'BILIBILI_SYNC',
 } as const
 
 export type MessageType = (typeof MESSAGE_TYPE)[keyof typeof MESSAGE_TYPE]
@@ -117,6 +120,23 @@ export interface DashSyncMessage {
   type: typeof MESSAGE_TYPE.DASH_SYNC
 }
 
+/** popup → background。下载一条 B 站分轨；withAudio 时再带上带宽最高的音频。 */
+export interface BilibiliDownloadMessage {
+  type: typeof MESSAGE_TYPE.BILIBILI_DOWNLOAD
+  url: string
+  tabId?: number
+  withAudio?: boolean
+}
+
+export interface BilibiliCancelMessage {
+  type: typeof MESSAGE_TYPE.BILIBILI_CANCEL
+  url: string
+}
+
+export interface BilibiliSyncMessage {
+  type: typeof MESSAGE_TYPE.BILIBILI_SYNC
+}
+
 export type ExtensionMessage =
   | MediaFoundMessage
   | GetMediaMessage
@@ -130,6 +150,9 @@ export type ExtensionMessage =
   | DashDownloadMessage
   | DashCancelMessage
   | DashSyncMessage
+  | BilibiliDownloadMessage
+  | BilibiliCancelMessage
+  | BilibiliSyncMessage
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -241,6 +264,22 @@ export function isDashSyncMessage(value: unknown): value is DashSyncMessage {
   return isRecord(value) && value.type === MESSAGE_TYPE.DASH_SYNC
 }
 
+export function isBilibiliDownloadMessage(value: unknown): value is BilibiliDownloadMessage {
+  if (!isRecord(value) || value.type !== MESSAGE_TYPE.BILIBILI_DOWNLOAD) return false
+  if (!isHttpishUrl(value.url)) return false
+  if (value.tabId !== undefined && !isTabId(value.tabId)) return false
+  if (value.withAudio !== undefined && typeof value.withAudio !== 'boolean') return false
+  return true
+}
+
+export function isBilibiliCancelMessage(value: unknown): value is BilibiliCancelMessage {
+  return isRecord(value) && value.type === MESSAGE_TYPE.BILIBILI_CANCEL && isHttpishUrl(value.url)
+}
+
+export function isBilibiliSyncMessage(value: unknown): value is BilibiliSyncMessage {
+  return isRecord(value) && value.type === MESSAGE_TYPE.BILIBILI_SYNC
+}
+
 export function isExtensionMessage(value: unknown): value is ExtensionMessage {
   return (
     isMediaFoundMessage(value) ||
@@ -254,6 +293,9 @@ export function isExtensionMessage(value: unknown): value is ExtensionMessage {
     isDashInspectMessage(value) ||
     isDashDownloadMessage(value) ||
     isDashCancelMessage(value) ||
-    isDashSyncMessage(value)
+    isDashSyncMessage(value) ||
+    isBilibiliDownloadMessage(value) ||
+    isBilibiliCancelMessage(value) ||
+    isBilibiliSyncMessage(value)
   )
 }

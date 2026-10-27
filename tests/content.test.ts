@@ -535,6 +535,79 @@ describe('Content Script DOM 扫描', () => {
     })
   })
 
+  describe('页面里的 playinfo（示例数据）', () => {
+    it('只解析 script 文本，不执行脚本，坏掉的赋值直接忽略', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const playinfo = {
+        data: {
+          accept_quality: [80],
+          accept_description: ['1080P'],
+          dash: {
+            video: [
+              {
+                id: 80,
+                baseUrl: 'https://cdn.example.test/example-data/v.m4s',
+                backupUrl: ['https://cdn.example.test/example-data/backup.m4s'],
+                codecs: 'avc1.640028',
+                width: 1920,
+                height: 1080,
+              },
+            ],
+            audio: [
+              {
+                id: 1,
+                baseUrl: 'https://cdn.example.test/example-data/a.m4s',
+                bandwidth: 192000,
+              },
+            ],
+          },
+        },
+      }
+      const script = document.createElement('script')
+      // text/plain 让测试环境不要执行这段脚本。扩展只读文本。
+      script.type = 'text/plain'
+      script.textContent = `window.__playinfo__ = ${JSON.stringify(playinfo)};`
+      const broken = document.createElement('script')
+      broken.type = 'text/plain'
+      broken.textContent = 'window.__playinfo__ = { "data": '
+      document.body.append(script, broken)
+      const send = vi.fn<(items: MediaItemDraft[]) => void>()
+      boot(send)
+      await vi.advanceTimersByTimeAsync(DOM_SCAN_DEBOUNCE_MS)
+      expect(send).toHaveBeenCalledTimes(1)
+      expect(send.mock.calls[0]?.[0]).toEqual([
+        draft({
+          url: 'https://cdn.example.test/example-data/v.m4s',
+          kind: 'video',
+          ext: 'm4s',
+          downloadable: false,
+          note: '只下载页面当前能播放的内容，不支持会员专享。视频和音频分开保存，扩展不能把两路 fMP4 合成一个文件。链接有有效期，失效后请先刷新页面再下载。',
+          bilibili: {
+            role: 'video',
+            label: 'B站视频 1080P · AVC',
+            qualityId: 80,
+            width: 1920,
+            height: 1080,
+            codecs: 'avc1.640028',
+          },
+        }),
+        draft({
+          url: 'https://cdn.example.test/example-data/a.m4s',
+          kind: 'audio',
+          ext: 'm4s',
+          downloadable: false,
+          note: '只下载页面当前能播放的内容，不支持会员专享。视频和音频分开保存，扩展不能把两路 fMP4 合成一个文件。链接有有效期，失效后请先刷新页面再下载。',
+          bilibili: {
+            role: 'audio',
+            label: 'B站音频 192kbps',
+            qualityId: 1,
+            bandwidth: 192000,
+          },
+        }),
+      ])
+    })
+  })
+
   describe('隔离环境', () => {
     it('扫描时不改 fetch、XHR、JSON.parse，也不注入脚本', async () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
