@@ -1,13 +1,15 @@
 /**
- * 后台下载页。chrome.offscreen 打开它，不给用户看。
+ * 后台下载页。由后台用 offscreen 打开，不给用户看。
  *
  * Service worker 会被回收，分片下载和拼接不能放在那里。
- * 这里按清单顺序把分片拉进内存，拼成一个 Blob，再交给 chrome.downloads。
+ * 这里只按清单顺序把分片拉进内存，拼成一个 Blob。
+ * 进度和保存文件通过 chrome.runtime 交给 service worker。
+ * 这个页面除了 chrome.runtime，不使用别的扩展 API。
  * MPEG-TS 在保存前转封装成 mp4。转失败就仍保存原来的 .ts。
  * 带 EXT-X-MAP 的 fMP4 不再转一次。不设置请求头，也不伪造 Referer。
  */
 
-import { describeInterruptReason } from '../shared/download-status'
+import { describeInterruptReason } from '../shared/interrupt-reason'
 import { buildDownloadFilename } from '../shared/filename'
 import { downloadSegmentsInOrder } from '../shared/hls-download'
 import { fetchPlaylistText, fetchSegmentBytes } from '../shared/hls-fetch'
@@ -21,18 +23,15 @@ import {
   parseHlsPlaylist,
   type HlsPlaylist,
 } from '../shared/hls'
-import { abortDashInspect, inspectDash, startDashDownload, type DashHost } from './dash-task'
 import { DASH_JOB_STORAGE_KEY } from '../shared/dash-job'
-import {
-  HLS_JOB_STORAGE_KEY,
-  readHlsJobMap,
-  toVariantChoice,
-  trimHlsJobs,
-  type HlsJobMap,
-  type HlsJobRecord,
-} from '../shared/hls-job'
+import { HLS_JOB_STORAGE_KEY, toVariantChoice, type HlsJobRecord } from '../shared/hls-job'
+import { abortDashInspect, inspectDash, startDashDownload, type DashHost } from './dash-task'
+import { inspectFailureMessage, settleJob } from './failure'
+import { cancelStoredJob, putJob, saveBlobFile } from './runtime-bridge'
 
 const ROLE = 'offscreen'
+const HLS_CANCEL_PHASES = ['downloading', 'inspecting', 'picking', 'remuxing'] as const
+const DASH_CANCEL_PHASES = ['downloading', 'inspecting', 'picking'] as const
 
 interface DownloadRequest {
   playlistUrl: string
@@ -44,11 +43,13 @@ interface DownloadRequest {
 interface ActiveDownload {
   key: string
   controller: AbortController
+  epoch: number
 }
 
 let active: ActiveDownload | undefined
 let inspecting: { key: string; controller: AbortController } | undefined
 let writeQueue: Promise<void> = Promise.resolve()
+let epochCounter = 0
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -67,13 +68,9 @@ function enqueue(task: () => Promise<void>): Promise<void> {
   return run
 }
 
-async function readMap(storageKey = HLS_JOB_STORAGE_KEY): Promise<HlsJobMap> {
-  const stored = await chrome.storage.session.get(storageKey)
-  return readHlsJobMap(stored[storageKey])
-}
-
-async function saveMap(map: HlsJobMap, storageKey = HLS_JOB_STORAGE_KEY): Promise<void> {
-  await chrome.storage.session.set({ [storageKey]: trimHlsJobs(map) })
+function activate(key: string, controller: AbortController): void {
+  epochCounter += 1
+  active = { key, controller, epoch: epochCounter }
 }
 
 function writeJob(
@@ -85,13 +82,24 @@ function writeJob(
   return enqueue(async () => {
     // 同一个清单被重新开始之后，旧任务晚到的进度不能把新任务盖掉。
     if (controller && active?.controller !== controller) return
-    const map = await readMap(storageKey)
-    map[key] = record
-    await saveMap(map, storageKey)
+    const next = controller && active ? { ...record, epoch: active.epoch } : record
+    await putJob(storageKey, key, next)
   })
 }
 
-function job(input: Omit<HlsJobRecord, 'updatedAt'>): HlsJobRecord {
+function writeJobLater(
+  key: string,
+  record: HlsJobRecord,
+  controller: AbortController | undefined,
+  storageKey: string,
+  label: string,
+): void {
+  void writeJob(key, record, controller, storageKey).catch((error: unknown) => {
+    warn(label, error)
+  })
+}
+
+function job(input: Omit<HlsJobRecord, 'updatedAt' | 'epoch'>): HlsJobRecord {
   const record: HlsJobRecord = {
     phase: input.phase,
     message: input.message,
@@ -165,12 +173,14 @@ async function inspect(playlistUrl: string): Promise<unknown> {
   } catch (error) {
     if (controller.signal.aborted) {
       if (inspecting?.controller === controller) {
-        await writeJob(playlistUrl, job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0 }))
+        await settleJob(() =>
+          writeJob(playlistUrl, job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0 })),
+        )
       }
       return { ok: false, error: HLS_TEXT.cancelled }
     }
     warn('读取清单失败', error)
-    return { ok: false, error: HLS_TEXT.network }
+    return { ok: false, error: inspectFailureMessage(error) }
   } finally {
     if (inspecting?.controller === controller) inspecting = undefined
   }
@@ -193,8 +203,10 @@ function acceptDownload(request: DownloadRequest): { ok: true } | { ok: false; e
   if (active?.key === request.playlistUrl) active.controller.abort()
   const controller = new AbortController()
   // 先占住，避免同步检查把正在开始的任务当成已经中断。
-  active = { key: request.playlistUrl, controller }
-  void runDownload(request, controller)
+  activate(request.playlistUrl, controller)
+  void runDownload(request, controller).catch((error: unknown) => {
+    warn('HLS 下载任务异常', error)
+  })
   return { ok: true }
 }
 
@@ -205,7 +217,6 @@ async function failJob(key: string, controller: AbortController, message: string
 async function runDownload(request: DownloadRequest, controller: AbortController): Promise<void> {
   const signal = controller.signal
   const key = request.playlistUrl
-  let objectUrl: string | undefined
   try {
     let bandwidth: number | undefined
     let separateAudio = false
@@ -280,7 +291,7 @@ async function runDownload(request: DownloadRequest, controller: AbortController
       onProgress(progress) {
         if (!stillCurrent(controller)) return
         completed = progress.completed
-        void writeJob(
+        writeJobLater(
           key,
           job({
             phase: 'downloading',
@@ -290,6 +301,8 @@ async function runDownload(request: DownloadRequest, controller: AbortController
             warning: assessment.warning,
           }),
           controller,
+          HLS_JOB_STORAGE_KEY,
+          '写入进度失败',
         )
       },
     })
@@ -332,7 +345,9 @@ async function runDownload(request: DownloadRequest, controller: AbortController
               warning: assessment.warning,
             }),
             controller,
-          ),
+          ).catch((error: unknown) => {
+            warn('写入转封装状态失败', error)
+          }),
       })
     } catch (error) {
       // fMP4 不走转封装。TS 转封装出了预料之外的错，也要留下 .ts，不能让整次下载失败。
@@ -363,22 +378,13 @@ async function runDownload(request: DownloadRequest, controller: AbortController
       ext: planned.ext,
       index: request.index,
     })
-    // 分片已经是独立的 Uint8Array。这里只做一次类型断言，不再复制一份，避免峰值内存再翻一倍。
-    const blob = new Blob(planned.parts as BlobPart[], { type: planned.mime })
-    objectUrl = URL.createObjectURL(blob)
-    // 只传 url / filename / saveAs / conflictAction，不加 headers。
-    const downloadId = await chrome.downloads.download({
-      url: objectUrl,
-      filename,
-      saveAs: false,
-      conflictAction: 'uniquify',
-    })
+    const saved = await saveBlobFile(planned.parts, planned.mime, filename)
     if (!stillCurrent(controller)) return
-    if (typeof downloadId !== 'number') {
-      await failJob(key, controller, '保存文件失败', total)
+    if (!saved.ok) {
+      await settleJob(() => failJob(key, controller, saved.error, total))
       return
     }
-    console.info('[media-grabber] HLS 已保存', downloadId, filename)
+    console.info('[media-grabber] HLS 已保存', saved.downloadId, filename)
     await writeJob(
       key,
       job({
@@ -393,48 +399,17 @@ async function runDownload(request: DownloadRequest, controller: AbortController
   } catch (error) {
     if (!stillCurrent(controller)) return
     if (signal.aborted) {
-      await writeJob(key, job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0 }), controller)
+      await settleJob(() =>
+        writeJob(key, job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0 }), controller),
+      )
       return
     }
     warn('HLS 下载失败', error)
     const message = describeInterruptReason(error instanceof Error ? error.message : undefined)
-    await failJob(key, controller, message)
+    await settleJob(() => failJob(key, controller, message))
   } finally {
-    if (objectUrl) {
-      const url = objectUrl
-      // chrome.downloads 读取 blob 地址是异步的，马上 revoke 会让保存失败。
-      setTimeout(() => URL.revokeObjectURL(url), 60_000)
-    }
     if (active?.controller === controller) active = undefined
   }
-}
-
-async function syncStorage(storageKey: string, phases: ReadonlySet<string>): Promise<void> {
-  await enqueue(async () => {
-    const map = await readMap(storageKey)
-    let changed = false
-    for (const [key, record] of Object.entries(map)) {
-      if (!phases.has(record.phase)) continue
-      if (active?.key === key) continue
-      map[key] = {
-        ...record,
-        phase: 'failed',
-        message: HLS_TEXT.interrupted,
-        updatedAt: Date.now(),
-      }
-      changed = true
-    }
-    if (changed) await saveMap(map, storageKey)
-  })
-}
-
-const HLS_ACTIVE_PHASES = new Set(['downloading', 'inspecting', 'remuxing'])
-const DASH_ACTIVE_PHASES = new Set(['downloading', 'inspecting'])
-
-async function syncJobs(): Promise<{ ok: true }> {
-  await syncStorage(HLS_JOB_STORAGE_KEY, HLS_ACTIVE_PHASES)
-  await syncStorage(DASH_JOB_STORAGE_KEY, DASH_ACTIVE_PHASES)
-  return { ok: true }
 }
 
 const dashHost: DashHost = {
@@ -448,7 +423,7 @@ const dashHost: DashHost = {
     if (active?.key === key) active.controller.abort()
   },
   setActive(key, controller) {
-    active = { key, controller }
+    activate(key, controller)
   },
   still(controller) {
     return active?.controller === controller
@@ -468,24 +443,11 @@ function cancelJob(playlistUrl: string): { ok: true } {
   }
   if (inspecting?.key === playlistUrl) inspecting.controller.abort()
   void enqueue(async () => {
-    const map = await readMap()
-    const record = map[playlistUrl]
-    if (!record) return
-    if (
-      record.phase !== 'downloading' &&
-      record.phase !== 'inspecting' &&
-      record.phase !== 'picking' &&
-      record.phase !== 'remuxing'
-    ) {
-      return
+    try {
+      await cancelStoredJob(HLS_JOB_STORAGE_KEY, playlistUrl, HLS_CANCEL_PHASES)
+    } catch (error) {
+      warn('取消任务状态失败', error)
     }
-    map[playlistUrl] = {
-      ...record,
-      phase: 'cancelled',
-      message: HLS_TEXT.cancelled,
-      updatedAt: Date.now(),
-    }
-    await saveMap(map)
   })
   return { ok: true }
 }
@@ -497,22 +459,18 @@ function cancelDash(playlistUrl: string): { ok: true } {
     return { ok: true }
   }
   void enqueue(async () => {
-    const map = await readMap(DASH_JOB_STORAGE_KEY)
-    const record = map[playlistUrl]
-    if (!record) return
-    if (record.phase !== 'downloading' && record.phase !== 'inspecting' && record.phase !== 'picking') return
-    map[playlistUrl] = {
-      ...record,
-      phase: 'cancelled',
-      message: HLS_TEXT.cancelled,
-      updatedAt: Date.now(),
+    try {
+      await cancelStoredJob(DASH_JOB_STORAGE_KEY, playlistUrl, DASH_CANCEL_PHASES)
+    } catch (error) {
+      warn('取消任务状态失败', error)
     }
-    await saveMap(map, DASH_JOB_STORAGE_KEY)
   })
   return { ok: true }
 }
 
-function readDashRequest(value: Record<string, unknown>): { playlistUrl: string; representationId?: string; title?: string; index?: number } | undefined {
+function readDashRequest(
+  value: Record<string, unknown>,
+): { playlistUrl: string; representationId?: string; title?: string; index?: number } | undefined {
   if (typeof value.playlistUrl !== 'string' || value.playlistUrl.trim() === '') return undefined
   const request: { playlistUrl: string; representationId?: string; title?: string; index?: number } = {
     playlistUrl: value.playlistUrl.trim(),
@@ -525,7 +483,7 @@ function readDashRequest(value: Record<string, unknown>): { playlistUrl: string;
   return request
 }
 
-function start(): void {
+export function startOffscreen(): void {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!isRecord(message) || typeof message.type !== 'string') return undefined
     if (message.type === 'HLS_OFFSCREEN_INSPECT') {
@@ -535,7 +493,7 @@ function start(): void {
       }
       void inspect(message.playlistUrl.trim()).then(sendResponse, (error: unknown) => {
         warn('检查清单失败', error)
-        sendResponse({ ok: false, error: HLS_TEXT.network })
+        sendResponse({ ok: false, error: inspectFailureMessage(error) })
       })
       return true
     }
@@ -560,7 +518,7 @@ function start(): void {
       }
       void inspectDash(message.playlistUrl.trim(), dashHost).then(sendResponse, (error: unknown) => {
         warn('检查 DASH 清单失败', error)
-        sendResponse({ ok: false, error: HLS_TEXT.network })
+        sendResponse({ ok: false, error: inspectFailureMessage(error) })
       })
       return true
     }
@@ -579,20 +537,23 @@ function start(): void {
       return undefined
     }
     if (message.type === 'DASH_OFFSCREEN_SYNC' || message.type === 'HLS_OFFSCREEN_SYNC') {
-      void syncJobs().then(sendResponse, (error: unknown) => {
-        warn('同步 HLS 状态失败', error)
-        sendResponse({ ok: true })
-      })
-      return true
+      const response: { ok: true; activeKey?: string } = { ok: true }
+      if (active?.key) response.activeKey = active.key
+      sendResponse(response)
+      return undefined
     }
     return undefined
   })
 }
 
-const params = new URLSearchParams(location.search)
-if (params.get('role') === ROLE) {
-  start()
-} else {
+function shouldStart(): boolean {
+  if (typeof location === 'undefined') return false
+  return new URLSearchParams(location.search).get('role') === ROLE
+}
+
+if (shouldStart()) {
+  startOffscreen()
+} else if (typeof document !== 'undefined') {
   const note = document.querySelector('#note')
   if (note) note.textContent = '这是后台下载用的页面，请关闭。下载请点工具栏上的 Media Grabber。'
 }

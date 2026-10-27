@@ -1,9 +1,10 @@
 /**
  * 把 DASH 下载交给 offscreen document。
- * service worker 只转消息，并补上页面标题和列表序号。分片字节不经过这里。
+ * service worker 补上页面标题和列表序号。进度和保存文件见 offscreen-jobs.ts。
+ * 分片字节不经过这里。
  */
 
-import { downloadContext, ensureOffscreen, sendOffscreen } from './hls'
+import { downloadContext, ensureOffscreen, relayJobSync, sendOffscreen } from './hls'
 import { normalizeUrl } from '../shared/classify'
 import { HLS_TEXT, isHttpUrl } from '../shared/hls'
 import {
@@ -113,8 +114,8 @@ export function handleDashMessage(
     return true
   }
   if (isDashSyncMessage(message)) {
-    void sendOffscreen({ type: 'DASH_OFFSCREEN_SYNC' }).then(
-      (response) => sendResponse(response ?? { ok: true }),
+    void relayJobSync().then(
+      (response) => sendResponse(response),
       (error: unknown) => {
         warn('同步 DASH 状态失败', error)
         sendResponse({ ok: true })

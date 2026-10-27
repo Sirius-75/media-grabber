@@ -79,7 +79,7 @@ action: { default_popup: "src/popup/index.html" }
 | `storage` | 用 `chrome.storage.session` 存每个 tab 的资源列表。service worker 会被回收，存储能保证数据不丢；关掉浏览器后自动清空。 |
 | `tabs` | popup 要拿到当前 tab 的 id 和标题（标题用于生成文件名）；后台还要监听 `tabs.onRemoved` 和导航事件来清理数据。 |
 | `clipboardWrite` | popup 里用 `navigator.clipboard.writeText` 复制链接。popup 有用户手势时通常不需要这个权限，这里声明上是为了保险，可选。 |
-| `offscreen` | v2 才加。HLS 分片要在扩展页面里拼成 Blob。这个长任务不能放在会被回收的 service worker 里，所以用 `chrome.offscreen` 开一个不显示的文档。理由见第 10 节。 |
+| `offscreen` | v2 才加。HLS / DASH 分片要在扩展页面里拼成 Blob。这个长任务不能放在会被回收的 service worker 里，所以用 `chrome.offscreen` 开一个不显示的文档。这个文档只能使用 `chrome.runtime`，会话存储和 `chrome.downloads` 仍由 service worker 调用。理由见第 10 节。 |
 
 不申请的权限：`declarativeNetRequest`（不改请求，也不伪造 Referer 或其他请求头）、`scripting`（用静态 content script 就够了）、`cookies`、`debugger`。
 
@@ -272,10 +272,11 @@ MVP（T1–T8）只把 m3u8 / mpd 列出来供复制。v2 分成三步。V2-1、
    - `#EXT-X-BYTERANGE`、`#EXT-X-GAP`、`#EXT-X-SKIP`、关键帧预览、图片清单、中途更换初始化段、看起来像 fMP4 但没有 MAP。广告打点标签忽略。
 3. **下载引擎**
    - 长任务放在 `chrome.offscreen` 的文档里（`src/offscreen/`），不放在 service worker。因此 manifest 增加 `offscreen` 权限。
-   - 同时拉 4 片。每一片失败后再试 2 次。可以取消。进度是已下载片数 / 总片数，写在 `chrome.storage.session`，popup 关掉再打开还在。
+   - offscreen 文档只能使用 `chrome.runtime`。它只负责拉分片和拼接。进度通过消息发给 service worker，由 service worker 串行写入 `chrome.storage.session`。旧任务晚到的进度不能盖住后开始的那一次。
+   - 同时拉 4 片。每一片失败后再试 2 次。可以取消。进度是已下载片数 / 总片数，popup 关掉再打开还在。
    - `fetch` 不设置 `headers`，不伪造 Referer，不用 `declarativeNetRequest`。`credentials: 'include'` 只带浏览器里已经有的 Cookie。
 4. **输出和内存**
-   - 按顺序拼成一个 Blob，再交给 `chrome.downloads`。文件名用现有的 `buildDownloadFilename`。
+   - 按顺序拼成一个 Blob，再 `URL.createObjectURL`。offscreen 把这个地址和文件名发给 service worker，由 service worker 调用 `chrome.downloads.download`（只传 `url` / `filename` / `saveAs` / `conflictAction`，不加请求头）。收到回复后再过约 60 秒撤销这个地址。文件名用现有的 `buildDownloadFilename`。
    - 用带宽 × 时长估算体积。预计或实际超过 2GB 就拒绝，中文说明是为了避免占满内存，并且不保存半成品。
    - 预计达到 512MB，或分片达到 300 个，先给中文警告，仍允许下载。
    - 主清单里某条清晰度带了 `AUDIO` 组时，警告声音可能在另一条清单里。本次不合并音轨。
@@ -343,9 +344,9 @@ mux.js 的 Transmuxer 只吃 MPEG-TS（以及 AAC），不能把两路已经是 
 
 #### 和 HLS 的复用
 
-- 下载跑在同一个 offscreen 文档里（`src/offscreen/dash-task.ts`），不进 service worker。解析器不打进后台包。没有新权限。
+- 下载跑在同一个 offscreen 文档里（`src/offscreen/dash-task.ts`），不进 service worker。解析器不打进后台包。没有新权限。offscreen 只拉取和拼接；进度写入和 `chrome.downloads` 与 HLS 一样交给 service worker。视频和音频两个文件都这样保存。
 - 进度、取消、并发 4、失败后再试 2 次，都走原来的 `downloadSegmentsInOrder`。
-- 任务记录形状和 HLS 相同，单独放在 `chrome.storage.session` 的 `dash-jobs`。关掉 popup 再打开还能看到。同一时间只允许一个 HLS 或 DASH 下载。
+- 任务记录形状和 HLS 相同，单独放在 `chrome.storage.session` 的 `dash-jobs`。offscreen 把记录发给 service worker 再写入。关掉 popup 再打开还能看到。同一时间只允许一个 HLS 或 DASH 下载。
 - 文件名用 `buildDownloadFilename`。直接把 `.mpd` 交给 `chrome.downloads` 会被拒绝，并提示用列表里的下载。
 
 ### 这一步故意不做

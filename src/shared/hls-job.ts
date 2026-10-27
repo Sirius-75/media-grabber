@@ -1,6 +1,7 @@
 /**
- * HLS 下载进度放在 chrome.storage.session。
- * popup 关掉再打开，还是读这一份。这里只做校验，不碰 chrome。
+ * HLS 下载进度的记录形状。
+ * service worker 把它写进会话存储，popup 关掉再打开还是读这一份。
+ * 这里只做校验，不碰浏览器 API。
  */
 
 import type { HlsVariant } from './hls'
@@ -39,6 +40,11 @@ export interface HlsJobRecord {
   warning?: string
   variants?: HlsVariantChoice[]
   updatedAt: number
+  /**
+   * 同一次下载的写入序号。这条清单重新开始后会变大。
+   * 序号更小的进度不能盖住已经写下的新任务。
+   */
+  epoch?: number
 }
 
 export type HlsJobMap = Record<string, HlsJobRecord>
@@ -111,6 +117,10 @@ function parseJob(value: unknown): HlsJobRecord | undefined {
       variants.push(parsed)
     }
     record.variants = variants
+  }
+  if (value.epoch !== undefined) {
+    if (typeof value.epoch !== 'number' || !Number.isInteger(value.epoch) || value.epoch < 0) return undefined
+    record.epoch = value.epoch
   }
   return record
 }

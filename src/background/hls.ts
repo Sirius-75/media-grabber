@@ -1,11 +1,13 @@
 /**
- * 把 HLS 下载交给 offscreen document。
- * service worker 只负责把消息转过去，并补上页面标题和列表序号。
- * 分片字节不经过这里。
+ * 把 HLS 清单的检查和分片下载交给 offscreen document。
+ * service worker 补上页面标题和列表序号。
+ * 进度写入和文件保存不在这里，见 offscreen-jobs.ts。分片字节不经过这里。
  */
 
 import { normalizeUrl } from '../shared/classify'
 import { HLS_TEXT, isHttpUrl } from '../shared/hls'
+import { readOffscreenActiveKey } from '../shared/offscreen-bridge'
+import { syncStoredJobs } from './offscreen-jobs'
 import {
   isHlsCancelMessage,
   isHlsDownloadMessage,
@@ -135,6 +137,23 @@ export async function downloadContext(
   return context
 }
 
+/** 问 offscreen 哪一条还在下，再把其余停在半截的进度标成中断。 */
+export async function relayJobSync(): Promise<{ ok: true }> {
+  let activeKey: string | undefined
+  try {
+    const response = await sendOffscreen({ type: 'HLS_OFFSCREEN_SYNC' })
+    activeKey = readOffscreenActiveKey(response)
+  } catch (error) {
+    warn('读取正在下载的任务失败', error)
+  }
+  try {
+    await syncStoredJobs(activeKey)
+  } catch (error) {
+    warn('写入中断状态失败', error)
+  }
+  return { ok: true }
+}
+
 async function forwardDownload(playlistUrl: string, mediaUrl: string, tabId: number | undefined): Promise<unknown> {
   const title = await pageTitle(tabId)
   const index = await listIndex(tabId, playlistUrl)
@@ -219,8 +238,8 @@ export function handleHlsMessage(
     return true
   }
   if (isHlsSyncMessage(message)) {
-    void sendOffscreen({ type: 'HLS_OFFSCREEN_SYNC' }).then(
-      (response) => sendResponse(response ?? { ok: true }),
+    void relayJobSync().then(
+      (response) => sendResponse(response),
       (error: unknown) => {
         warn('同步 HLS 状态失败', error)
         sendResponse({ ok: true })

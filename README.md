@@ -124,15 +124,17 @@ media-grabber/
 ├── scripts/package.mjs   把 dist 打成 zip
 ├── public/icons/         图标
 ├── src/
-│   ├── background/       后台：发现网络里的媒体、保存列表、把下载转走
+│   ├── background/       后台：发现媒体、保存列表、写 HLS/DASH 进度、调用下载
 │   ├── content/          在网页里查找 video / audio
-│   ├── offscreen/        不显示的页面：下载并拼接 HLS / DASH 分片
+│   ├── offscreen/        不显示的页面：只拉取并拼接 HLS / DASH 分片
 │   ├── popup/            点图标后弹出的窗口
 │   └── shared/           大家共用的类型、HLS / DASH 解析、下载调度和 TS 转封装
 ├── tests/                自动测试
 ├── dist/                 npm run build 之后出现，加载这个文件夹
 └── release/              npm run package 之后出现，里面是 zip
 ```
+
+HLS 和 DASH 的分片下载在不显示的 offscreen 页面里完成。这个页面只能用 `chrome.runtime`。它把进度发给 service worker，由 service worker 写进 `chrome.storage.session`；拼好的 Blob 地址和文件名也发给 service worker，由 service worker 调用 `chrome.downloads` 保存。offscreen 自己不碰会话存储，也不调用下载 API。
 
 ## 开发命令
 

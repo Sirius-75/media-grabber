@@ -2,6 +2,7 @@
  * 在 offscreen 文档里下载 DASH 分片。
  * 不在 service worker 里跑。不设置请求头。
  * 视频和音频分开保存，不尝试把两路 fMP4 合成一个文件。
+ * 拼好的 Blob 交给后台保存。这里不调用下载 API。
  */
 
 import { describeDashFetchFailure, parseMpd, planDashDownload } from '../shared/dash'
@@ -11,6 +12,8 @@ import { downloadSegmentsInOrder } from '../shared/hls-download'
 import { fetchPlaylistText, fetchSegmentBytes } from '../shared/hls-fetch'
 import { HLS_TEXT, describePlaylistStatus, hlsProgressText } from '../shared/hls'
 import type { HlsJobRecord } from '../shared/hls-job'
+import { inspectFailureMessage, settleJob } from './failure'
+import { saveBlobFile } from './runtime-bridge'
 
 export interface DashRequest {
   playlistUrl: string
@@ -105,33 +108,17 @@ export async function inspectDash(playlistUrl: string, host: DashHost): Promise<
   } catch (error) {
     if (controller.signal.aborted) {
       if (inspecting?.controller === controller) {
-        await host.write(playlistUrl, job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0 }))
+        await settleJob(() =>
+          host.write(playlistUrl, job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0 })),
+        )
       }
       return { ok: false, error: HLS_TEXT.cancelled }
     }
     warn('读取 DASH 清单失败', error)
-    return { ok: false, error: HLS_TEXT.network }
+    return { ok: false, error: inspectFailureMessage(error) }
   } finally {
     if (inspecting?.controller === controller) inspecting = undefined
   }
-}
-
-async function saveFile(
-  parts: Uint8Array[],
-  mime: string,
-  filename: string,
-): Promise<number | undefined> {
-  const blob = new Blob(parts as BlobPart[], { type: mime })
-  const objectUrl = URL.createObjectURL(blob)
-  // chrome.downloads 读取 blob 是异步的，马上 revoke 会让保存失败。
-  setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000)
-  const downloadId = await chrome.downloads.download({
-    url: objectUrl,
-    filename,
-    saveAs: false,
-    conflictAction: 'uniquify',
-  })
-  return typeof downloadId === 'number' ? downloadId : undefined
 }
 
 async function runDash(request: DashRequest, controller: AbortController, host: DashHost): Promise<void> {
@@ -178,17 +165,21 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
       onProgress(progress) {
         if (!host.still(controller)) return
         completed = progress.completed
-        void host.write(
-          key,
-          job({
-            phase: 'downloading',
-            message: hlsProgressText(progress.completed, progress.total),
-            completed: progress.completed,
-            total: progress.total,
-            warning: plan.warning,
-          }),
-          controller,
-        )
+        void host
+          .write(
+            key,
+            job({
+              phase: 'downloading',
+              message: hlsProgressText(progress.completed, progress.total),
+              completed: progress.completed,
+              total: progress.total,
+              warning: plan.warning,
+            }),
+            controller,
+          )
+          .catch((error: unknown) => {
+            warn('写入进度失败', error)
+          })
       },
     })
     if (!host.still(controller)) return
@@ -223,15 +214,17 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
         ext: file.ext,
         index: request.index,
       })
-      const downloadId = await saveFile(parts, file.mime, filename)
+      const savedFile = await saveBlobFile(parts, file.mime, filename)
       if (!host.still(controller)) return
-      if (downloadId === undefined) {
-        const message = saved.length > 0 ? DASH_TEXT.audioSaveFailed : DASH_TEXT.saveFailed
-        await host.write(key, job({ phase: 'failed', message, completed: total, total, warning: plan.warning }), controller)
+      if (!savedFile.ok) {
+        const message = saved.length > 0 ? DASH_TEXT.audioSaveFailed : savedFile.error
+        await settleJob(() =>
+          host.write(key, job({ phase: 'failed', message, completed: total, total, warning: plan.warning }), controller),
+        )
         return
       }
       saved.push(filename)
-      console.info('[media-grabber] DASH 已保存', downloadId, filename)
+      console.info('[media-grabber] DASH 已保存', savedFile.downloadId, filename)
     }
 
     await host.write(
@@ -248,11 +241,19 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
   } catch (error) {
     if (!host.still(controller)) return
     if (signal.aborted) {
-      await host.write(key, job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0 }), controller)
+      await settleJob(() =>
+        host.write(key, job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0 }), controller),
+      )
       return
     }
     warn('DASH 下载失败', error)
-    await host.write(key, job({ phase: 'failed', message: HLS_TEXT.network, completed: 0, total: 0 }), controller)
+    await settleJob(() =>
+      host.write(
+        key,
+        job({ phase: 'failed', message: inspectFailureMessage(error), completed: 0, total: 0 }),
+        controller,
+      ),
+    )
   } finally {
     host.clear(controller)
   }
@@ -264,6 +265,8 @@ export function startDashDownload(request: DashRequest, host: DashHost): { ok: t
   host.abortSame(request.playlistUrl)
   const controller = new AbortController()
   host.setActive(request.playlistUrl, controller)
-  void runDash(request, controller, host)
+  void runDash(request, controller, host).catch((error: unknown) => {
+    warn('DASH 下载任务异常', error)
+  })
   return { ok: true }
 }
