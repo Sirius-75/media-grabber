@@ -2,7 +2,7 @@ import { defineManifest } from '@crxjs/vite-plugin'
 
 /**
  * MV3 manifest。权限与 PLAN.md 第 4 节一致。
- * offscreen 是 v2 才加的：HLS 分片下载放在 offscreen document 里，不放在 service worker。
+ * offscreen 是 v2 才加的：HLS 和 DASH 分片下载放在 offscreen document 里，不放在 service worker。
  * 图标放在 public/icons，CRXJS 会按 public 目录的根路径解析。
  *
  * name、description、version 是扩展卡片上给用户看的。

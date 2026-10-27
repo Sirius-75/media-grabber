@@ -21,6 +21,8 @@ import {
   parseHlsPlaylist,
   type HlsPlaylist,
 } from '../shared/hls'
+import { abortDashInspect, inspectDash, startDashDownload, type DashHost } from './dash-task'
+import { DASH_JOB_STORAGE_KEY } from '../shared/dash-job'
 import {
   HLS_JOB_STORAGE_KEY,
   readHlsJobMap,
@@ -65,22 +67,27 @@ function enqueue(task: () => Promise<void>): Promise<void> {
   return run
 }
 
-async function readMap(): Promise<HlsJobMap> {
-  const stored = await chrome.storage.session.get(HLS_JOB_STORAGE_KEY)
-  return readHlsJobMap(stored[HLS_JOB_STORAGE_KEY])
+async function readMap(storageKey = HLS_JOB_STORAGE_KEY): Promise<HlsJobMap> {
+  const stored = await chrome.storage.session.get(storageKey)
+  return readHlsJobMap(stored[storageKey])
 }
 
-async function saveMap(map: HlsJobMap): Promise<void> {
-  await chrome.storage.session.set({ [HLS_JOB_STORAGE_KEY]: trimHlsJobs(map) })
+async function saveMap(map: HlsJobMap, storageKey = HLS_JOB_STORAGE_KEY): Promise<void> {
+  await chrome.storage.session.set({ [storageKey]: trimHlsJobs(map) })
 }
 
-function writeJob(key: string, record: HlsJobRecord, controller?: AbortController): Promise<void> {
+function writeJob(
+  key: string,
+  record: HlsJobRecord,
+  controller?: AbortController,
+  storageKey = HLS_JOB_STORAGE_KEY,
+): Promise<void> {
   return enqueue(async () => {
     // 同一个清单被重新开始之后，旧任务晚到的进度不能把新任务盖掉。
     if (controller && active?.controller !== controller) return
-    const map = await readMap()
+    const map = await readMap(storageKey)
     map[key] = record
-    await saveMap(map)
+    await saveMap(map, storageKey)
   })
 }
 
@@ -402,12 +409,12 @@ async function runDownload(request: DownloadRequest, controller: AbortController
   }
 }
 
-async function syncJobs(): Promise<{ ok: true }> {
+async function syncStorage(storageKey: string, phases: ReadonlySet<string>): Promise<void> {
   await enqueue(async () => {
-    const map = await readMap()
+    const map = await readMap(storageKey)
     let changed = false
     for (const [key, record] of Object.entries(map)) {
-      if (record.phase !== 'downloading' && record.phase !== 'inspecting' && record.phase !== 'remuxing') continue
+      if (!phases.has(record.phase)) continue
       if (active?.key === key) continue
       map[key] = {
         ...record,
@@ -417,9 +424,41 @@ async function syncJobs(): Promise<{ ok: true }> {
       }
       changed = true
     }
-    if (changed) await saveMap(map)
+    if (changed) await saveMap(map, storageKey)
   })
+}
+
+const HLS_ACTIVE_PHASES = new Set(['downloading', 'inspecting', 'remuxing'])
+const DASH_ACTIVE_PHASES = new Set(['downloading', 'inspecting'])
+
+async function syncJobs(): Promise<{ ok: true }> {
+  await syncStorage(HLS_JOB_STORAGE_KEY, HLS_ACTIVE_PHASES)
+  await syncStorage(DASH_JOB_STORAGE_KEY, DASH_ACTIVE_PHASES)
   return { ok: true }
+}
+
+const dashHost: DashHost = {
+  isActive(key) {
+    return active?.key === key
+  },
+  busyOther(key) {
+    return active && active.key !== key ? HLS_TEXT.busy : undefined
+  },
+  abortSame(key) {
+    if (active?.key === key) active.controller.abort()
+  },
+  setActive(key, controller) {
+    active = { key, controller }
+  },
+  still(controller) {
+    return active?.controller === controller
+  },
+  clear(controller) {
+    if (active?.controller === controller) active = undefined
+  },
+  write(key, record, controller) {
+    return writeJob(key, record, controller, DASH_JOB_STORAGE_KEY)
+  },
 }
 
 function cancelJob(playlistUrl: string): { ok: true } {
@@ -451,6 +490,41 @@ function cancelJob(playlistUrl: string): { ok: true } {
   return { ok: true }
 }
 
+function cancelDash(playlistUrl: string): { ok: true } {
+  abortDashInspect(playlistUrl)
+  if (active?.key === playlistUrl) {
+    active.controller.abort()
+    return { ok: true }
+  }
+  void enqueue(async () => {
+    const map = await readMap(DASH_JOB_STORAGE_KEY)
+    const record = map[playlistUrl]
+    if (!record) return
+    if (record.phase !== 'downloading' && record.phase !== 'inspecting' && record.phase !== 'picking') return
+    map[playlistUrl] = {
+      ...record,
+      phase: 'cancelled',
+      message: HLS_TEXT.cancelled,
+      updatedAt: Date.now(),
+    }
+    await saveMap(map, DASH_JOB_STORAGE_KEY)
+  })
+  return { ok: true }
+}
+
+function readDashRequest(value: Record<string, unknown>): { playlistUrl: string; representationId?: string; title?: string; index?: number } | undefined {
+  if (typeof value.playlistUrl !== 'string' || value.playlistUrl.trim() === '') return undefined
+  const request: { playlistUrl: string; representationId?: string; title?: string; index?: number } = {
+    playlistUrl: value.playlistUrl.trim(),
+  }
+  if (typeof value.representationId === 'string' && value.representationId.trim()) {
+    request.representationId = value.representationId.trim()
+  }
+  if (typeof value.title === 'string' && value.title.trim()) request.title = value.title
+  if (typeof value.index === 'number' && Number.isInteger(value.index) && value.index >= 1) request.index = value.index
+  return request
+}
+
 function start(): void {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!isRecord(message) || typeof message.type !== 'string') return undefined
@@ -479,7 +553,32 @@ function start(): void {
       sendResponse(cancelJob(message.playlistUrl))
       return undefined
     }
-    if (message.type === 'HLS_OFFSCREEN_SYNC') {
+    if (message.type === 'DASH_OFFSCREEN_INSPECT') {
+      if (typeof message.playlistUrl !== 'string' || message.playlistUrl.trim() === '') {
+        sendResponse({ ok: false, error: HLS_TEXT.badPlaylistUrl })
+        return undefined
+      }
+      void inspectDash(message.playlistUrl.trim(), dashHost).then(sendResponse, (error: unknown) => {
+        warn('检查 DASH 清单失败', error)
+        sendResponse({ ok: false, error: HLS_TEXT.network })
+      })
+      return true
+    }
+    if (message.type === 'DASH_OFFSCREEN_DOWNLOAD') {
+      const request = readDashRequest(message)
+      if (!request) {
+        sendResponse({ ok: false, error: '下载请求无效' })
+        return undefined
+      }
+      sendResponse(startDashDownload(request, dashHost))
+      return undefined
+    }
+    if (message.type === 'DASH_OFFSCREEN_CANCEL') {
+      if (typeof message.playlistUrl !== 'string') return undefined
+      sendResponse(cancelDash(message.playlistUrl))
+      return undefined
+    }
+    if (message.type === 'DASH_OFFSCREEN_SYNC' || message.type === 'HLS_OFFSCREEN_SYNC') {
       void syncJobs().then(sendResponse, (error: unknown) => {
         warn('同步 HLS 状态失败', error)
         sendResponse({ ok: true })

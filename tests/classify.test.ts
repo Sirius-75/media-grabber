@@ -16,7 +16,7 @@ const direct = {
     kind: 'dash',
     ext: 'mpd',
     downloadable: false,
-    note: 'DASH 清单，仅支持复制链接',
+    note: 'DASH 清单，可下载未加密的点播',
   },
 } as const
 

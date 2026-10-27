@@ -54,7 +54,7 @@ export const HLS_TEXT = {
   network: '网络连接失败',
   playlistTooLarge: '清单文件过大，无法解析',
   playlistMissing: '找不到清单（404）',
-  busy: '已有 HLS 下载在进行，请先取消或等待结束',
+  busy: '已有下载在进行，请先取消或等待结束',
   offscreen: '无法打开后台下载页，请重试',
   picking: '请选择清晰度',
   inspecting: '正在读取清单…',

@@ -4,6 +4,7 @@
  */
 
 import { classify } from './classify'
+import { DASH_TEXT } from './dash-text'
 import { HLS_TEXT } from './hls'
 import type { MediaKind } from './types'
 
@@ -17,7 +18,6 @@ export const DOWNLOAD_FAILED_TEXT = '下载失败'
 /** 每个条目上最多留这么多条最近状态，避免 session 越积越长。 */
 export const MAX_REMEMBERED_DOWNLOADS = 50
 
-const DASH_NOTE = 'DASH 清单，仅支持复制链接'
 const BLOB_NOTE = 'blob 地址，无法直接下载'
 const DATA_NOTE = 'data 地址，无法直接下载'
 const GENERIC_NOTE = '无法直接下载'
@@ -108,7 +108,7 @@ export function downloadBlockReason(input: DownloadBlockInput): string | undefin
   if (scheme !== 'http' && scheme !== 'https') return SCHEME_NOTE
 
   if (input.kind === 'hls') return HLS_TEXT.directBlock
-  if (input.kind === 'dash') return noteOr(input.note, DASH_NOTE)
+  if (input.kind === 'dash') return DASH_TEXT.directBlock
 
   if (input.fromStore) {
     if (input.downloadable === true && (input.kind === 'video' || input.kind === 'audio')) {
@@ -119,7 +119,7 @@ export function downloadBlockReason(input: DownloadBlockInput): string | undefin
 
   const classified = classify(url)
   if (classified?.kind === 'hls') return HLS_TEXT.directBlock
-  if (classified?.kind === 'dash') return noteOr(classified.note, DASH_NOTE)
+  if (classified?.kind === 'dash') return DASH_TEXT.directBlock
   if (!classified || classified.downloadable !== true) {
     return noteOr(classified?.note ?? input.note, GENERIC_NOTE)
   }

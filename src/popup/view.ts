@@ -12,6 +12,7 @@ import {
   type DownloadStatusRecord,
 } from '../shared/download-status'
 import { formatBytes } from '../shared/format'
+import { DASH_NOTE } from '../shared/dash-text'
 import type { HlsJobMap, HlsJobPhase, HlsJobRecord } from '../shared/hls-job'
 import type { MediaItem, MediaKind } from '../shared/types'
 
@@ -30,10 +31,11 @@ const KIND_LABEL: Record<MediaKind, string> = {
 
 const HLS_NOTE = 'HLS 清单，可下载未加密的点播'
 const OLD_HLS_NOTE = 'HLS 清单，仅支持复制链接'
+const OLD_DASH_NOTE = 'DASH 清单，仅支持复制链接'
 
 const KIND_FALLBACK_NOTE: Partial<Record<MediaKind, string>> = {
   hls: HLS_NOTE,
-  dash: 'DASH 清单，仅支持复制链接',
+  dash: DASH_NOTE,
 }
 
 export function kindLabel(kind: MediaKind): string {
@@ -74,9 +76,16 @@ export function canOfferDownload(
   return true
 }
 
-/** m3u8 的 http(s) 地址可以下载未加密点播。mpd 仍然只复制。 */
+/** m3u8 的 http(s) 地址可以下载未加密点播。 */
 export function canOfferHlsDownload(item: Pick<MediaItem, 'url' | 'kind'>): boolean {
   if (item.kind !== 'hls') return false
+  const scheme = schemeOf(item.url)
+  return scheme === 'http' || scheme === 'https'
+}
+
+/** mpd 的 http(s) 地址可以下载未加密的静态点播。 */
+export function canOfferDashDownload(item: Pick<MediaItem, 'url' | 'kind'>): boolean {
+  if (item.kind !== 'dash') return false
   const scheme = schemeOf(item.url)
   return scheme === 'http' || scheme === 'https'
 }
@@ -89,6 +98,11 @@ export function itemNote(
     const note = item.note?.trim()
     if (note && note !== OLD_HLS_NOTE) return note
     return HLS_NOTE
+  }
+  if (canOfferDashDownload(item)) {
+    const note = item.note?.trim()
+    if (note && note !== OLD_DASH_NOTE) return note
+    return DASH_NOTE
   }
   const note = item.note?.trim()
   if (note) return note
@@ -186,6 +200,10 @@ export interface ListActions {
   onHlsStart?: (url: string, mediaUrl: string, button: HTMLButtonElement) => void
   onHlsCancel?: (url: string, button: HTMLButtonElement) => void
   onHlsVariant?: (url: string, mediaUrl: string) => void
+  onDashDownload?: (url: string, button: HTMLButtonElement) => void
+  onDashStart?: (url: string, mediaUrl: string, button: HTMLButtonElement) => void
+  onDashCancel?: (url: string, button: HTMLButtonElement) => void
+  onDashVariant?: (url: string, mediaUrl: string) => void
 }
 
 /** 把当前列表画进 ul。调用方保留 ul 上的点击监听，这里只换子节点。 */
@@ -195,9 +213,17 @@ export function renderList(
   statuses?: DownloadStatusMap,
   jobs?: HlsJobMap,
   preferredVariant?: ReadonlyMap<string, string>,
+  dashJobs?: HlsJobMap,
 ): void {
   const rows = items.map((item, index) =>
-    renderItem(item, index, statusForItem(item, statuses), hlsJobForItem(item, jobs), preferredVariant?.get(item.url)),
+    renderItem(
+      item,
+      index,
+      statusForItem(item, statuses),
+      hlsJobForItem(item, jobs),
+      preferredVariant?.get(item.url),
+      hlsJobForItem(item, dashJobs),
+    ),
   )
   list.replaceChildren(...rows)
 }
@@ -229,6 +255,13 @@ export function bindListActions(
       const mediaUrl = select instanceof HTMLSelectElement ? select.value : ''
       actions.onHlsStart?.(item.url, mediaUrl, button)
     }
+    if (button.dataset.action === 'dash-download') actions.onDashDownload?.(item.url, button)
+    if (button.dataset.action === 'dash-cancel') actions.onDashCancel?.(item.url, button)
+    if (button.dataset.action === 'dash-start') {
+      const select = row.querySelector('select')
+      const mediaUrl = select instanceof HTMLSelectElement ? select.value : ''
+      actions.onDashStart?.(item.url, mediaUrl, button)
+    }
   })
   list.addEventListener('change', (event) => {
     const select = event.target
@@ -238,7 +271,8 @@ export function bindListActions(
     const index = Number(row.dataset.index)
     const item = getItems()[index]
     if (!item || !select.value) return
-    actions.onHlsVariant?.(item.url, select.value)
+    if (item.kind === 'dash') actions.onDashVariant?.(item.url, select.value)
+    else actions.onHlsVariant?.(item.url, select.value)
   })
 }
 
@@ -269,6 +303,7 @@ function renderItem(
   status: DownloadStatusRecord | undefined,
   hlsJob: HlsJobRecord | undefined,
   preferredMediaUrl: string | undefined,
+  dashJob: HlsJobRecord | undefined,
 ): HTMLLIElement {
   const row = document.createElement('li')
   row.className = 'item'
@@ -300,7 +335,12 @@ function renderItem(
 
   row.append(meta, url)
 
-  const hls = canOfferHlsDownload(item) ? hlsJob : undefined
+  const segment = canOfferHlsDownload(item)
+    ? { job: hlsJob, action: 'hls' as const }
+    : canOfferDashDownload(item)
+      ? { job: dashJob, action: 'dash' as const }
+      : undefined
+  const hls = segment?.job
   // 下载进行中时，进度和失败原因已经说明状态，不再重复清单说明。
   if (!hls || hls.phase === 'picking') {
     const note = itemNote(item)
@@ -356,7 +396,9 @@ function renderItem(
     actions.append(download)
   }
 
-  if (canOfferHlsDownload(item)) {
+  // HLS 和 DASH 共用进度、清晰度和取消。动作名前缀不同，避免点到另一条链路。
+  if (segment) {
+    const prefix = segment.action
     if (hls?.phase === 'picking' && hls.variants && hls.variants.length > 0) {
       const select = document.createElement('select')
       select.className = 'quality'
@@ -373,20 +415,20 @@ function renderItem(
       if (chosen) select.value = chosen
       const start = document.createElement('button')
       start.type = 'button'
-      start.dataset.action = 'hls-start'
+      start.dataset.action = `${prefix}-start`
       start.textContent = '开始下载'
       actions.append(select, start)
     } else if (hls?.phase === 'downloading' || hls?.phase === 'inspecting' || hls?.phase === 'remuxing') {
       const cancel = document.createElement('button')
       cancel.type = 'button'
-      cancel.dataset.action = 'hls-cancel'
+      cancel.dataset.action = `${prefix}-cancel`
       cancel.textContent = '取消'
       actions.append(cancel)
     } else {
       const download = document.createElement('button')
       download.type = 'button'
-      download.className = 'hls-download'
-      download.dataset.action = 'hls-download'
+      download.className = `${prefix}-download`
+      download.dataset.action = `${prefix}-download`
       download.textContent = '下载'
       actions.append(download)
     }

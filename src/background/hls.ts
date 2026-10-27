@@ -46,7 +46,7 @@ async function createOffscreen(): Promise<void> {
       url: `${OFFSCREEN_PATH}?role=offscreen`,
       reasons: [chrome.offscreen.Reason.BLOBS],
       justification:
-        '在扩展页面里把 HLS 分片拼成 Blob 再下载。Service worker 会被回收，不能在里面跑这个长任务。',
+        '在扩展页面里把 HLS 或 DASH 分片拼成 Blob 再下载。Service worker 会被回收，不能在里面跑这个长任务。',
     })
   } catch (error) {
     if (await hasOffscreen()) return
@@ -64,7 +64,7 @@ export function ensureOffscreen(): Promise<void> {
   return opening
 }
 
-async function sendOffscreen(message: Record<string, unknown>): Promise<unknown> {
+export async function sendOffscreen(message: Record<string, unknown>): Promise<unknown> {
   await ensureOffscreen()
   let lastError: unknown
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -120,6 +120,19 @@ function isFailure(value: unknown): value is { ok: false; error: string } {
     'error' in value &&
     typeof value.error === 'string'
   )
+}
+
+/** 页面标题和列表序号。DASH 和 HLS 保存文件名时共用。 */
+export async function downloadContext(
+  tabId: number | undefined,
+  url: string,
+): Promise<{ title?: string; index?: number }> {
+  const title = await pageTitle(tabId)
+  const index = await listIndex(tabId, url)
+  const context: { title?: string; index?: number } = {}
+  if (title) context.title = title
+  if (index !== undefined) context.index = index
+  return context
 }
 
 async function forwardDownload(playlistUrl: string, mediaUrl: string, tabId: number | undefined): Promise<unknown> {

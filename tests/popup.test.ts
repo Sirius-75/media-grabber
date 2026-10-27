@@ -9,6 +9,7 @@ import { normalizeUrl } from '../src/shared/classify'
 import {
   BUTTON_FLASH_MS,
   bindListActions,
+  canOfferDashDownload,
   canOfferDownload,
   canOfferHlsDownload,
   hlsJobForItem,
@@ -121,7 +122,10 @@ describe('展示文案', () => {
   it('不可下载的条目带说明，直链没有多余说明', () => {
     expect(itemNote(video)).toBeUndefined()
     expect(itemNote(hls)).toBe('HLS 清单，可下载未加密的点播')
-    expect(itemNote(dash)).toBe('DASH 清单，仅支持复制链接')
+    expect(itemNote(dash)).toBe('DASH 清单，可下载未加密的点播')
+    expect(canOfferDashDownload(dash)).toBe(true)
+    expect(canOfferDashDownload(hls)).toBe(false)
+    expect(canOfferDashDownload({ ...dash, url: 'blob:https://example.com/1' })).toBe(false)
     expect(itemNote(blobVideo)).toBe('blob 地址，无法直接下载')
     expect(itemNote(dataAudio)).toBe('data 地址，无法直接下载')
     expect(itemNote({ ...video, downloadable: false, note: undefined })).toBe('无法直接下载')
@@ -158,7 +162,7 @@ describe('展示文案', () => {
 })
 
 describe('列表', () => {
-  it('复制拿到完整链接；HLS 有自己的下载按钮，DASH、blob、data 没有', () => {
+  it('复制拿到完整链接；HLS 和 DASH 各有下载按钮，blob、data 没有', () => {
     const blocked = item({
       url: 'https://cdn.example/locked.mp4',
       kind: 'video',
@@ -194,6 +198,9 @@ describe('列表', () => {
     hlsButtons[0].click()
     expect(downloads).toEqual([video.url])
 
+    const dashButtons = [...list.querySelectorAll<HTMLButtonElement>('[data-action="dash-download"]')]
+    expect(dashButtons).toHaveLength(1)
+
     const urlNodes = [...list.querySelectorAll('.url')]
     expect(urlNodes[4].getAttribute('title')).toBe(blobVideo.url)
     expect(urlNodes[4].textContent).not.toBe(blobVideo.url)
@@ -202,7 +209,7 @@ describe('列表', () => {
     const notes = [...list.querySelectorAll('.note')].map((node) => node.textContent)
     expect(notes).toEqual([
       'HLS 清单，可下载未加密的点播',
-      'DASH 清单，仅支持复制链接',
+      'DASH 清单，可下载未加密的点播',
       'blob 地址，无法直接下载',
       'data 地址，无法直接下载',
       '无法直接下载',
@@ -386,6 +393,90 @@ describe('HLS 下载界面', () => {
 
   it('旧的「仅复制」说明改成可以下载未加密点播', () => {
     expect(itemNote({ ...hls, note: 'HLS 清单，仅支持复制链接' })).toBe('HLS 清单，可下载未加密的点播')
+    expect(itemNote({ ...dash, note: 'DASH 清单，仅支持复制链接' })).toBe('DASH 清单，可下载未加密的点播')
+  })
+})
+
+describe('DASH 下载界面', () => {
+  it('多清晰度默认停在最高的一条，进度和取消走自己的按钮', () => {
+    const list = document.createElement('ul')
+    const starts: string[] = []
+    const cancels: string[] = []
+    bindListActions(list, () => [dash], {
+      onCopy() {},
+      onDownload() {},
+      onDashStart(_url, representationId) {
+        starts.push(representationId)
+      },
+      onDashCancel(url) {
+        cancels.push(url)
+      },
+    })
+    const high = 'video-high'
+    const low = 'video-low'
+    renderList(
+      list,
+      [dash],
+      undefined,
+      undefined,
+      undefined,
+      {
+        [dash.url]: {
+          phase: 'picking',
+          message: '请选择清晰度',
+          completed: 0,
+          total: 0,
+          updatedAt: 1,
+          warning: '视频和音频是分开的，将保存成两个文件。扩展不能把两路 fMP4 合成一个文件',
+          variants: [
+            { url: high, label: '1920×1080 · 4500 kbps', bandwidth: 4500000, separateAudio: true },
+            { url: low, label: '640×360 · 800 kbps', bandwidth: 800000, separateAudio: true },
+          ],
+        },
+      },
+    )
+    const select = list.querySelector('select')
+    expect(select?.value).toBe(high)
+    expect(list.querySelector('.warning')?.textContent).toContain('两个文件')
+    expect(list.querySelector('[data-action="hls-start"]')).toBeNull()
+    list.querySelector<HTMLButtonElement>('[data-action="dash-start"]')?.click()
+    expect(starts).toEqual([high])
+
+    renderList(
+      list,
+      [dash],
+      undefined,
+      undefined,
+      new Map([[dash.url, high]]),
+      {
+        [dash.url]: {
+          phase: 'downloading',
+          message: '已下载 1/4',
+          completed: 1,
+          total: 4,
+          updatedAt: 2,
+          warning: '视频和音频是分开的，将保存成两个文件。扩展不能把两路 fMP4 合成一个文件',
+        },
+      },
+    )
+    expect(list.querySelector('.progress-fill')?.getAttribute('style')).toContain('25%')
+    expect(list.querySelector('.status')?.textContent).toBe('已下载 1/4')
+    expect(list.querySelector('[data-action="hls-cancel"]')).toBeNull()
+    list.querySelector<HTMLButtonElement>('[data-action="dash-cancel"]')?.click()
+    expect(cancels).toEqual([dash.url])
+
+    renderList(list, [dash], undefined, undefined, undefined, {
+      [dash.url]: {
+        phase: 'complete',
+        message: '视频和音频已分开保存。扩展不能把两路 fMP4 合成一个文件',
+        completed: 4,
+        total: 4,
+        updatedAt: 3,
+      },
+    })
+    expect(list.querySelector('.status')?.textContent).toContain('分开保存')
+    expect(list.querySelector('.status')?.className).toContain('status-complete')
+    expect(list.querySelector('[data-action="dash-download"]')).toBeTruthy()
   })
 })
 

@@ -37,7 +37,7 @@ describe('downloadBlockReason', () => {
         url: 'https://cdn.example/manifest.mpd',
         fromStore: false,
       }),
-    ).toBe('DASH 清单，仅支持复制链接')
+    ).toBe('DASH 清单不能当直链保存，请用列表里的下载')
     expect(
       downloadBlockReason({
         url: 'blob:https://example.com/8c2c',

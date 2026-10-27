@@ -21,6 +21,10 @@ export const MESSAGE_TYPE = {
   HLS_DOWNLOAD: 'HLS_DOWNLOAD',
   HLS_CANCEL: 'HLS_CANCEL',
   HLS_SYNC: 'HLS_SYNC',
+  DASH_INSPECT: 'DASH_INSPECT',
+  DASH_DOWNLOAD: 'DASH_DOWNLOAD',
+  DASH_CANCEL: 'DASH_CANCEL',
+  DASH_SYNC: 'DASH_SYNC',
 } as const
 
 export type MessageType = (typeof MESSAGE_TYPE)[keyof typeof MESSAGE_TYPE]
@@ -89,6 +93,30 @@ export interface HlsSyncMessage {
   type: typeof MESSAGE_TYPE.HLS_SYNC
 }
 
+/** popup → background。读 mpd：多清晰度时返回选项，只有一条时直接开始下载。 */
+export interface DashInspectMessage {
+  type: typeof MESSAGE_TYPE.DASH_INSPECT
+  url: string
+  tabId?: number
+}
+
+/** popup → background。representationId 是 Representation 的 id，不是分片地址。 */
+export interface DashDownloadMessage {
+  type: typeof MESSAGE_TYPE.DASH_DOWNLOAD
+  url: string
+  representationId: string
+  tabId?: number
+}
+
+export interface DashCancelMessage {
+  type: typeof MESSAGE_TYPE.DASH_CANCEL
+  url: string
+}
+
+export interface DashSyncMessage {
+  type: typeof MESSAGE_TYPE.DASH_SYNC
+}
+
 export type ExtensionMessage =
   | MediaFoundMessage
   | GetMediaMessage
@@ -98,6 +126,10 @@ export type ExtensionMessage =
   | HlsDownloadMessage
   | HlsCancelMessage
   | HlsSyncMessage
+  | DashInspectMessage
+  | DashDownloadMessage
+  | DashCancelMessage
+  | DashSyncMessage
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -187,6 +219,28 @@ export function isHlsSyncMessage(value: unknown): value is HlsSyncMessage {
   return isRecord(value) && value.type === MESSAGE_TYPE.HLS_SYNC
 }
 
+export function isDashInspectMessage(value: unknown): value is DashInspectMessage {
+  if (!isRecord(value) || value.type !== MESSAGE_TYPE.DASH_INSPECT) return false
+  if (!isHttpishUrl(value.url)) return false
+  if (value.tabId !== undefined && !isTabId(value.tabId)) return false
+  return true
+}
+
+export function isDashDownloadMessage(value: unknown): value is DashDownloadMessage {
+  if (!isRecord(value) || value.type !== MESSAGE_TYPE.DASH_DOWNLOAD) return false
+  if (!isHttpishUrl(value.url) || !isHttpishUrl(value.representationId)) return false
+  if (value.tabId !== undefined && !isTabId(value.tabId)) return false
+  return true
+}
+
+export function isDashCancelMessage(value: unknown): value is DashCancelMessage {
+  return isRecord(value) && value.type === MESSAGE_TYPE.DASH_CANCEL && isHttpishUrl(value.url)
+}
+
+export function isDashSyncMessage(value: unknown): value is DashSyncMessage {
+  return isRecord(value) && value.type === MESSAGE_TYPE.DASH_SYNC
+}
+
 export function isExtensionMessage(value: unknown): value is ExtensionMessage {
   return (
     isMediaFoundMessage(value) ||
@@ -196,6 +250,10 @@ export function isExtensionMessage(value: unknown): value is ExtensionMessage {
     isHlsInspectMessage(value) ||
     isHlsDownloadMessage(value) ||
     isHlsCancelMessage(value) ||
-    isHlsSyncMessage(value)
+    isHlsSyncMessage(value) ||
+    isDashInspectMessage(value) ||
+    isDashDownloadMessage(value) ||
+    isDashCancelMessage(value) ||
+    isDashSyncMessage(value)
   )
 }
