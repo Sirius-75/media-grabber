@@ -138,6 +138,7 @@ export interface HlsInspectResponseMaster {
   ok: true
   kind: 'master'
   variants: HlsVariantChoice[]
+  warning?: string
 }
 
 export interface HlsInspectResponseMedia {
@@ -168,7 +169,12 @@ export function readHlsUserResponse(value: unknown): HlsUserResponse | undefined
       if (!parsed) return undefined
       variants.push(parsed)
     }
-    return { ok: true, kind: 'master', variants }
+    const master: HlsInspectResponseMaster = { ok: true, kind: 'master', variants }
+    if (value.warning !== undefined) {
+      if (typeof value.warning !== 'string' || value.warning.trim() === '') return undefined
+      master.warning = value.warning.trim()
+    }
+    return master
   }
   if (value.kind === 'media') {
     if (typeof value.total !== 'number' || !Number.isFinite(value.total) || value.total < 0) return undefined

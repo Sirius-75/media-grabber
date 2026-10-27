@@ -7,6 +7,7 @@
  */
 
 import { normalizeUrl } from '../shared/classify'
+import { DASH_JOB_STORAGE_KEY, readDashJobMap } from '../shared/dash-job'
 import {
   DOWNLOAD_STATUS_STORAGE_KEY,
   readDownloadStatusMap,
@@ -21,7 +22,14 @@ import {
   type HlsJobMap,
   type HlsJobRecord,
 } from '../shared/hls-job'
-import { MESSAGE_TYPE, type DownloadMessage, type HlsDownloadMessage, type HlsInspectMessage } from '../shared/messages'
+import {
+  MESSAGE_TYPE,
+  type DashDownloadMessage,
+  type DashInspectMessage,
+  type DownloadMessage,
+  type HlsDownloadMessage,
+  type HlsInspectMessage,
+} from '../shared/messages'
 import type { MediaItem } from '../shared/types'
 import {
   bindListActions,
@@ -43,7 +51,8 @@ let tabId: number | undefined
 let items: MediaItem[] = []
 let statuses: DownloadStatusMap = {}
 let jobs: HlsJobMap = {}
-/** 用户在清晰度列表里点过的地址。重画列表时不要跳回默认项。 */
+let dashJobs: HlsJobMap = {}
+/** 用户在清晰度列表里点过的地址。DASH 里存的是 Representation id。重画时不要跳回默认项。 */
 const preferredVariant = new Map<string, string>()
 
 function showBanner(text: string): void {
@@ -66,7 +75,7 @@ function paint(): void {
 
   countEl.textContent = `共 ${items.length} 条`
   clearButton.disabled = tabId === undefined || items.length === 0
-  renderList(listEl, items, statuses, jobs, preferredVariant)
+  renderList(listEl, items, statuses, jobs, preferredVariant, dashJobs)
   const isEmpty = items.length === 0
   emptyEl.hidden = !isEmpty
   listEl.hidden = isEmpty
@@ -142,9 +151,14 @@ function rememberLocal(url: string, record: Omit<DownloadStatusRecord, 'updatedA
 }
 
 async function readSession(): Promise<void> {
-  const stored = await chrome.storage.session.get([DOWNLOAD_STATUS_STORAGE_KEY, HLS_JOB_STORAGE_KEY])
+  const stored = await chrome.storage.session.get([
+    DOWNLOAD_STATUS_STORAGE_KEY,
+    HLS_JOB_STORAGE_KEY,
+    DASH_JOB_STORAGE_KEY,
+  ])
   statuses = readDownloadStatusMap(stored[DOWNLOAD_STATUS_STORAGE_KEY])
   jobs = readHlsJobMap(stored[HLS_JOB_STORAGE_KEY])
+  dashJobs = readDashJobMap(stored[DASH_JOB_STORAGE_KEY])
 }
 
 function rememberJob(url: string, record: Omit<HlsJobRecord, 'updatedAt'>): void {
@@ -178,6 +192,7 @@ function onStorageChanged(
   if (area !== 'session') return
   let nextStatuses = statuses
   let nextJobs = jobs
+  let nextDash = dashJobs
   let changed = false
   if (DOWNLOAD_STATUS_STORAGE_KEY in changes) {
     const parsed = readDownloadStatusMap(changes[DOWNLOAD_STATUS_STORAGE_KEY]?.newValue)
@@ -193,9 +208,17 @@ function onStorageChanged(
       changed = true
     }
   }
+  if (DASH_JOB_STORAGE_KEY in changes) {
+    const parsed = readDashJobMap(changes[DASH_JOB_STORAGE_KEY]?.newValue)
+    if (!sameJobs(dashJobs, parsed)) {
+      nextDash = parsed
+      changed = true
+    }
+  }
   if (!changed) return
   statuses = nextStatuses
   jobs = nextJobs
+  dashJobs = nextDash
   paint()
 }
 
@@ -236,6 +259,7 @@ async function requestHlsDownload(url: string): Promise<void> {
         completed: 0,
         total: 0,
         variants: response.variants,
+        warning: response.warning,
       })
       paint()
       return
@@ -283,6 +307,107 @@ async function startHlsDownload(url: string, mediaUrl: string): Promise<void> {
     }
   } catch {
     rememberJob(url, { phase: 'failed', message: HLS_TEXT.offscreen, completed: 0, total: 0 })
+    paint()
+  }
+}
+
+function rememberDash(url: string, record: Omit<HlsJobRecord, 'updatedAt'>): void {
+  dashJobs = {
+    ...dashJobs,
+    [statusKey(url)]: { ...record, updatedAt: Date.now() },
+  }
+}
+
+async function requestDashDownload(url: string): Promise<void> {
+  rememberDash(url, { phase: 'inspecting', message: HLS_TEXT.inspecting, completed: 0, total: 0 })
+  paint()
+  const message: DashInspectMessage = { type: MESSAGE_TYPE.DASH_INSPECT, url }
+  if (tabId !== undefined) message.tabId = tabId
+  try {
+    const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))
+    if (!response || response.ok === false) {
+      rememberDash(url, {
+        phase: 'failed',
+        message: response && response.ok === false ? response.error : '读取清单失败',
+        completed: 0,
+        total: 0,
+      })
+      paint()
+      return
+    }
+    if ('kind' in response && response.kind === 'master') {
+      rememberDash(url, {
+        phase: 'picking',
+        message: HLS_TEXT.picking,
+        completed: 0,
+        total: 0,
+        variants: response.variants,
+        warning: response.warning,
+      })
+      paint()
+      return
+    }
+    if ('kind' in response && response.kind === 'media') {
+      rememberDash(url, {
+        phase: 'downloading',
+        message: HLS_TEXT.started,
+        completed: 0,
+        total: response.total,
+        warning: response.warning,
+      })
+      paint()
+      return
+    }
+    rememberDash(url, { phase: 'failed', message: '读取清单失败', completed: 0, total: 0 })
+    paint()
+  } catch {
+    rememberDash(url, { phase: 'failed', message: '读取清单失败', completed: 0, total: 0 })
+    paint()
+  }
+}
+
+async function startDashDownload(url: string, representationId: string): Promise<void> {
+  if (!representationId) {
+    rememberDash(url, { phase: 'failed', message: HLS_TEXT.noVariants, completed: 0, total: 0 })
+    paint()
+    return
+  }
+  preferredVariant.set(url, representationId)
+  const previous = dashJobs[statusKey(url)]
+  rememberDash(url, {
+    phase: 'downloading',
+    message: HLS_TEXT.started,
+    completed: 0,
+    total: 0,
+    warning: previous?.warning,
+  })
+  paint()
+  const message: DashDownloadMessage = { type: MESSAGE_TYPE.DASH_DOWNLOAD, url, representationId }
+  if (tabId !== undefined) message.tabId = tabId
+  try {
+    const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))
+    if (!response || response.ok === false) {
+      rememberDash(url, {
+        phase: 'failed',
+        message: response && response.ok === false ? response.error : HLS_TEXT.offscreen,
+        completed: 0,
+        total: 0,
+      })
+      paint()
+    }
+  } catch {
+    rememberDash(url, { phase: 'failed', message: HLS_TEXT.offscreen, completed: 0, total: 0 })
+    paint()
+  }
+}
+
+async function cancelDashDownload(url: string): Promise<void> {
+  rememberDash(url, { phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0 })
+  paint()
+  try {
+    await chrome.runtime.sendMessage({ type: MESSAGE_TYPE.DASH_CANCEL, url })
+  } catch {
+    rememberDash(url, { phase: 'failed', message: '取消失败，请再试一次', completed: 0, total: 0 })
     paint()
   }
 }
@@ -373,9 +498,11 @@ async function load(): Promise<void> {
     } catch {
       statuses = {}
       jobs = {}
+      dashJobs = {}
     }
     paint()
     void chrome.runtime.sendMessage({ type: MESSAGE_TYPE.HLS_SYNC }).catch(() => undefined)
+    void chrome.runtime.sendMessage({ type: MESSAGE_TYPE.DASH_SYNC }).catch(() => undefined)
   } catch {
     items = []
     paint()
@@ -408,6 +535,18 @@ function start(): void {
     },
     onHlsVariant(url, mediaUrl) {
       preferredVariant.set(url, mediaUrl)
+    },
+    onDashDownload(url) {
+      void requestDashDownload(url)
+    },
+    onDashStart(url, representationId) {
+      void startDashDownload(url, representationId)
+    },
+    onDashCancel(url) {
+      void cancelDashDownload(url)
+    },
+    onDashVariant(url, representationId) {
+      preferredVariant.set(url, representationId)
     },
   })
   chrome.storage.onChanged.addListener(onStorageChanged)

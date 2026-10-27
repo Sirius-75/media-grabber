@@ -5,6 +5,10 @@ import {
   isDownloadMessage,
   isExtensionMessage,
   isGetMediaMessage,
+  isDashCancelMessage,
+  isDashDownloadMessage,
+  isDashInspectMessage,
+  isDashSyncMessage,
   isHlsCancelMessage,
   isHlsDownloadMessage,
   isHlsInspectMessage,
@@ -23,6 +27,10 @@ describe('消息常量', () => {
       HLS_DOWNLOAD: 'HLS_DOWNLOAD',
       HLS_CANCEL: 'HLS_CANCEL',
       HLS_SYNC: 'HLS_SYNC',
+      DASH_INSPECT: 'DASH_INSPECT',
+      DASH_DOWNLOAD: 'DASH_DOWNLOAD',
+      DASH_CANCEL: 'DASH_CANCEL',
+      DASH_SYNC: 'DASH_SYNC',
     })
   })
 })
@@ -203,6 +211,29 @@ describe('HLS 消息', () => {
   })
 })
 
+describe('DASH 消息', () => {
+  it('检查、下载、取消和同步都要带上该有的字段', () => {
+    expect(isDashInspectMessage({ type: MESSAGE_TYPE.DASH_INSPECT, url: 'https://cdn.example/a.mpd', tabId: 2 })).toBe(
+      true,
+    )
+    expect(isDashInspectMessage({ type: MESSAGE_TYPE.DASH_INSPECT, url: '  ' })).toBe(false)
+    expect(
+      isDashDownloadMessage({
+        type: MESSAGE_TYPE.DASH_DOWNLOAD,
+        url: 'https://cdn.example/a.mpd',
+        representationId: 'video-1080',
+      }),
+    ).toBe(true)
+    expect(isDashDownloadMessage({ type: MESSAGE_TYPE.DASH_DOWNLOAD, url: 'https://cdn.example/a.mpd' })).toBe(false)
+    expect(isDashDownloadMessage({ type: MESSAGE_TYPE.DASH_DOWNLOAD, url: 'https://cdn.example/a.mpd', representationId: '  ' })).toBe(
+      false,
+    )
+    expect(isDashCancelMessage({ type: MESSAGE_TYPE.DASH_CANCEL, url: 'https://cdn.example/a.mpd' })).toBe(true)
+    expect(isDashSyncMessage({ type: MESSAGE_TYPE.DASH_SYNC })).toBe(true)
+    expect(isDashSyncMessage({ type: MESSAGE_TYPE.DASH_CANCEL })).toBe(false)
+  })
+})
+
 describe('isExtensionMessage', () => {
   it('协议里的消息都能通过，其它值不行', () => {
     expect(isExtensionMessage({ type: MESSAGE_TYPE.MEDIA_FOUND, items: [] })).toBe(true)
@@ -213,6 +244,15 @@ describe('isExtensionMessage', () => {
     )
     expect(isExtensionMessage({ type: MESSAGE_TYPE.HLS_INSPECT, url: 'https://cdn.example/a.m3u8' })).toBe(true)
     expect(isExtensionMessage({ type: MESSAGE_TYPE.HLS_SYNC })).toBe(true)
+    expect(isExtensionMessage({ type: MESSAGE_TYPE.DASH_INSPECT, url: 'https://cdn.example/a.mpd' })).toBe(true)
+    expect(
+      isExtensionMessage({
+        type: MESSAGE_TYPE.DASH_DOWNLOAD,
+        url: 'https://cdn.example/a.mpd',
+        representationId: 'video-1080',
+      }),
+    ).toBe(true)
+    expect(isExtensionMessage({ type: MESSAGE_TYPE.DASH_SYNC })).toBe(true)
     expect(isExtensionMessage({ type: 'NOPE' })).toBe(false)
     expect(isExtensionMessage(undefined)).toBe(false)
   })

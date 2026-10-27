@@ -4,8 +4,9 @@
  * 都在 initStore 里接线。
  * 嗅探只观察响应头：新媒体交给 addMedia，206 只交给 fillMediaSize，不在这里另写存储。
  * DOWNLOAD 在 download.ts 里处理：直链交给 chrome.downloads，不改请求头。
- * HLS 分片下载在 hls.ts 里转给 offscreen document，不在 service worker 里拼接。
+ * HLS 和 DASH 的分片下载都转给 offscreen document，不在 service worker 里拼接。
  */
+import { listenForDash } from './dash'
 import { listenForDownload } from './download'
 import { listenForHls } from './hls'
 import { addMedia, fillMediaSize, initStore } from './store'
@@ -14,6 +15,7 @@ import { startSniffer } from './sniffer'
 initStore()
 listenForDownload()
 listenForHls()
+listenForDash()
 
 startSniffer(
   (tabId, item) => {
