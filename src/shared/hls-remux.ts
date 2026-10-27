@@ -8,9 +8,13 @@
  *
  * 每一片单独转，下一片的时间轴接在上一片结束之后。
  * 这样 EXT-X-DISCONTINUITY 里时间戳归零也不会叠在一起。不做重编码。
+ *
+ * 全部转完后，用最后一片的 90kHz 终点回填初始化段里的时长。
+ * mux.js 原本写成未知（0xFFFFFFFF），只读文件头的播放器会显示成约 13 小时。
  */
 
 import { HLS_HARD_BYTE_LIMIT, HLS_TEXT } from './hls'
+import { patchInitSegmentDuration } from './hls-remux-duration'
 
 /** 转封装时内存里会同时有 TS 和 mp4。输入超过这个值就不再转，直接存 .ts。 */
 export const HLS_REMUX_MAX_INPUT_BYTES = HLS_HARD_BYTE_LIMIT / 2
@@ -117,7 +121,8 @@ export async function remuxTsSegments(input: {
   }
 
   if (!initSegment) return failure('no-output')
-  return { ok: true, parts: [initSegment, ...media] }
+  // baseMediaDecodeTime 此刻是最后一片的 nextBaseMediaDecodeTime。
+  return { ok: true, parts: [patchInitSegmentDuration(initSegment, baseMediaDecodeTime), ...media] }
 }
 
 /**

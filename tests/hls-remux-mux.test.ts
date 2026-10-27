@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { HLS_TEXT } from '../src/shared/hls'
-import { planHlsSave } from '../src/shared/hls-remux'
+import { planHlsSave, remuxTsSegments } from '../src/shared/hls-remux'
 import { transmuxTsSegment } from '../src/shared/hls-remux-mux'
 
 /** mux.js 自带的短 TS，用来确认转封装真的写出 fMP4，而不是只测了假的注入函数。 */
@@ -17,6 +17,67 @@ function concat(parts: readonly Uint8Array[]): Uint8Array {
     offset += part.byteLength
   }
   return out
+}
+
+interface InitDurations {
+  movieTimescale?: number
+  mvhd?: { timescale: number; duration: number }
+  tracks: Array<{ tkhd: number; mdhd: number; mdhdTimescale: number }>
+}
+
+/** 只读初始化段里的 mvhd / tkhd / mdhd，用来核对 mux.js 写出的未知时长有没有被改掉。 */
+function readInitDurations(bytes: Uint8Array): InitDurations {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const result: InitDurations = { tracks: [] }
+  let pendingTkhd: number | undefined
+
+  const visit = (start: number, end: number, descend: boolean): void => {
+    let offset = start
+    while (offset + 8 <= end) {
+      let size = view.getUint32(offset)
+      const type = String.fromCharCode(bytes[offset + 4] ?? 0, bytes[offset + 5] ?? 0, bytes[offset + 6] ?? 0, bytes[offset + 7] ?? 0)
+      let header = 8
+      if (size === 1) {
+        if (offset + 16 > end) return
+        const large = view.getBigUint64(offset + 8)
+        if (large > BigInt(Number.MAX_SAFE_INTEGER)) return
+        size = Number(large)
+        header = 16
+      } else if (size === 0) {
+        size = end - offset
+      }
+      if (size < header || offset + size > end) return
+      const payload = offset + header
+      if (type === 'mvhd' || type === 'mdhd') {
+        const version = bytes[payload] ?? 0
+        const timescaleAt = version === 1 ? payload + 20 : payload + 12
+        const durationAt = version === 1 ? payload + 24 : payload + 16
+        const durationWidth = version === 1 ? 8 : 4
+        if (durationAt + durationWidth <= offset + size && (version === 0 || version === 1)) {
+          const timescale = view.getUint32(timescaleAt)
+          const duration = version === 1 ? Number(view.getBigUint64(durationAt)) : view.getUint32(durationAt)
+          if (type === 'mvhd') {
+            result.movieTimescale = timescale
+            result.mvhd = { timescale, duration }
+          } else if (pendingTkhd !== undefined) {
+            result.tracks.push({ tkhd: pendingTkhd, mdhd: duration, mdhdTimescale: timescale })
+            pendingTkhd = undefined
+          }
+        }
+      } else if (type === 'tkhd') {
+        const version = bytes[payload] ?? 0
+        const durationAt = version === 1 ? payload + 28 : payload + 20
+        const durationWidth = version === 1 ? 8 : 4
+        if (durationAt + durationWidth <= offset + size && (version === 0 || version === 1)) {
+          pendingTkhd = version === 1 ? Number(view.getBigUint64(durationAt)) : view.getUint32(durationAt)
+        }
+      }
+      if (descend && (type === 'moov' || type === 'trak' || type === 'mdia')) visit(payload, offset + size, true)
+      offset += size
+    }
+  }
+  visit(0, bytes.byteLength, true)
+  return result
 }
 
 function boxTimes(bytes: Uint8Array, type: string): number[] {
@@ -71,6 +132,42 @@ describe('mux.js 转封装', () => {
     expect(times.length).toBeGreaterThanOrEqual(2)
     expect(Math.min(...times)).toBe(0)
     expect(Math.max(...times)).toBeGreaterThan(0)
+  })
+
+  it('初始化段的 duration 写成真实总时长，而不是 0xFFFFFFFF', async () => {
+    const segment = new Uint8Array(readFileSync(SAMPLE))
+    const nexts: number[] = []
+    let rawInit: Uint8Array | undefined
+    const saved = await remuxTsSegments({
+      segments: [segment, segment],
+      transmux: (data, base, sequence) => {
+        const out = transmuxTsSegment(data, base, sequence)
+        if (!out) return undefined
+        rawInit ??= Uint8Array.from(out.initSegment)
+        nexts.push(out.nextBaseMediaDecodeTime)
+        return out
+      },
+    })
+    expect(saved.ok).toBe(true)
+    if (!saved.ok || !rawInit) return
+    expect(nexts).toHaveLength(2)
+    expect(nexts[1]).toBeGreaterThan(nexts[0] ?? 0)
+    const raw = readInitDurations(rawInit)
+    const patched = readInitDurations(saved.parts[0]!)
+    expect(raw.mvhd?.duration).toBe(0xffffffff)
+    expect(raw.tracks.length).toBeGreaterThan(0)
+    expect(raw.tracks.every((track) => track.tkhd === 0xffffffff)).toBe(true)
+    expect(patched.movieTimescale).toBe(90000)
+    expect(patched.mvhd?.duration).toBe(nexts[1])
+    expect(patched.mvhd?.duration).not.toBe(0xffffffff)
+    expect(patched.tracks).toHaveLength(raw.tracks.length)
+    for (const track of patched.tracks) {
+      expect(track.tkhd).toBe(nexts[1])
+      expect(track.tkhd).not.toBe(0xffffffff)
+      const mdhd = Number((BigInt(nexts[1]!) * BigInt(track.mdhdTimescale) + 45000n) / 90000n)
+      expect(track.mdhd).toBe(mdhd)
+      expect(track.mdhd).not.toBe(0xffffffff)
+    }
   })
 
   it('不是 TS 时退回原字节，扩展名仍是 ts', async () => {

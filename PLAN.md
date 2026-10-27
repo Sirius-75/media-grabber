@@ -251,7 +251,7 @@ flowchart LR
 - [ ] 未加密 HLS 点播：主清单能选清晰度（默认最高），进度条会走，取消有效，关掉 popup 再打开还能看到进度
 - [ ] 直播 m3u8、带 EXT-X-KEY 的 m3u8 会用中文拒绝，不会开始下分片
 - [ ] 未加密的 DASH 点播：多清晰度能选（默认最高视频），进度条会走，取消有效。视频和音频分开时保存两个文件，并写明不能合成。直播、ContentProtection、多个 Period、SegmentBase 会用中文拒绝
-- [ ] 下载出来的文件：普通 TS 转封装成功时是 `.mp4`（fMP4，没有重编码）；转封装失败时是 `.ts`，条目上写明可用 VLC 播放。带 EXT-X-MAP 的 fMP4 仍是顺序拼接的 `.mp4`
+- [ ] 下载出来的文件：普通 TS 转封装成功时是 `.mp4`（fMP4，没有重编码，文件头时长是实际总时长）；转封装失败时是 `.ts`，条目上写明可用 VLC 播放。带 EXT-X-MAP 的 fMP4 仍是顺序拼接的 `.mp4`
 
 ## 10. v2
 
@@ -301,13 +301,14 @@ MPEG-TS 分片下完后，在 offscreen 文档里转封装成 `.mp4`，不重新
 
 行为：
 
-- 每一片单独转。下一片的时间轴接在上一片结束之后，所以 `EXT-X-DISCONTINUITY` 里时间戳归零也不会叠到同一段。
+- 每一片单独转。下一片的时间轴接在上一片结束之后，所以 `EXT-X-DISCONTINUITY` 里时间戳归零也不会叠到同一段。分片里的 `tfdt`（`baseMediaDecodeTime`）保持 mux.js 写出的值，不改。
 - 转封装进行时，popup 显示「正在转成 mp4…」，可以取消。
 - 转不出（例如 H.265、AC-3，或 mux.js 抛错）时，整次下载不算失败：保存原来的 `.ts`，条目写「转封装失败，已保存为 .ts，可用 VLC 播放」。
 - 已下载字节超过 1GB 时不再转。转完的 mp4 若超过 2GB 也不采用。两种情况都改存 `.ts`，并说明是为了避免占满内存。
 - 声音在另一条音轨清单里时，仍然只下这一路，不合并。
+- mux.js 把初始化段里 `mvhd` 和每个 `tkhd` 的 duration 写成 `0xFFFFFFFF`（未知）。`mvhd` 的 timescale 是 90000，只读文件头的播放器会把时长显示成约 13 小时（4294967295 / 90000）。全部转完、已经知道最后一片的 `nextBaseMediaDecodeTime`（90kHz）之后，把这个总时长写回初始化段的一份拷贝：`mvhd.duration` 和每个 `tkhd.duration` 用 movie timescale，每个 `mdhd.duration` 用该轨自己的 timescale（总秒数 × 该轨 timescale）。box 对不上、找不到这些字段，或 version 0 装不下这个 32 位时长时，保持原来的初始化段，下载仍然成功。DASH 的 mp4 仍是源文件原样保存，不走这次修补。
 
-输出是 fragmented MP4。Chrome、Edge、VLC 通常能播。系统自带播放器能不能播，要在真实 Chrome 里看文件，这一步没有代为验证。
+输出是 fragmented MP4。Chrome、Edge、VLC 通常能播。初始化段里的时长是实际总时长，Windows 文件属性或播放器应显示真实时长（Big Buck Bunny HD 约 10 分 34 秒），而不是约 13 小时。系统自带播放器能不能解码这种 fMP4，仍要在真实环境里看文件。
 
 ### V2-3 DASH（mpd）下载（已完成）
 
