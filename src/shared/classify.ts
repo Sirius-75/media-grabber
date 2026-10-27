@@ -35,7 +35,7 @@ interface RecognizedMedia {
 
 const BLOB_NOTE = 'blob 地址，无法直接下载'
 const DATA_NOTE = 'data 地址，无法直接下载'
-const HLS_NOTE = 'HLS 清单，可下载未加密的点播'
+const HLS_NOTE = 'HLS 清单，可下载未加密或 AES-128 点播'
 
 /** 看 pathname 的后缀，不看 query 和 hash。 */
 const EXTENSIONS: Record<string, RecognizedMedia> = {

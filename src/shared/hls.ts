@@ -1,8 +1,12 @@
 /**
  * HLS 清单解析。不访问 chrome，也不发请求。
  *
- * 只接受点播（有 EXT-X-ENDLIST）、未加密的清单。
- * 直播、任何 EXT-X-KEY / EXT-X-SESSION-KEY 加密、字节范围、缺失分片都直接拒绝。
+ * 只接受点播（有 EXT-X-ENDLIST）。
+ * 标准 AES-128（METHOD=AES-128、KEYFORMAT 缺省或 identity、密钥是 http(s)）可以解析。
+ * 每个分片记下自己的密钥地址和 IV。IV 有属性就用属性，没有就用 media sequence 的大端 16 字节。
+ * 密钥中途换成新的 EXT-X-KEY 时，后面的分片用新的密钥和 IV。METHOD=NONE 之后的分片不再加密。
+ * SAMPLE-AES、非 identity 的 KEYFORMAT、清单里的 DRM 迹象、直播、字节范围、缺失分片都直接拒绝。
+ * EXT-X-SESSION-KEY 不拿来解密分片。它若是 AES-128 identity 就忽略；若是 DRM 或 SAMPLE-AES 就拒绝整份清单。
  * EXT-X-DISCONTINUITY 允许：分片仍按出现顺序拼接，不在这里切文件。
  * 相对地址用浏览器的 URL 规则拼到清单地址上，不会把清单 query 里的 token 抄到分片上。
  */
@@ -30,7 +34,22 @@ export const HLS_TEXT = {
   notPlaylist: '这不是有效的 HLS 清单',
   badPlaylistUrl: '只支持 http 或 https 清单',
   live: '这是直播流（没有 EXT-X-ENDLIST），暂不支持下载',
-  sessionKey: '清单使用了加密（EXT-X-SESSION-KEY），不支持加密或 DRM 内容',
+  sampleAes: '清单使用了 SAMPLE-AES，不支持这种加密',
+  keyFormat: '密钥格式不是 identity，不支持这种加密',
+  drm: '清单含有 DRM（Widevine、PlayReady 或 FairPlay），不支持',
+  badIv: '清单里的 IV 不是合法的十六进制',
+  missingKeyUri: 'AES-128 缺少密钥地址',
+  badKeyUri: 'AES-128 密钥地址不是 http 或 https',
+  aesMap: 'AES-128 目前只支持 MPEG-TS 分片，不支持带初始化段的 fMP4',
+  badMediaSequence: '清单里的 EXT-X-MEDIA-SEQUENCE 无效',
+  aes128Note: '含 AES-128 加密',
+  keyLength: '解密密钥长度不是 16 字节',
+  keyForbidden: '获取解密密钥失败：服务器拒绝访问（403）',
+  keyUnauthorized: '获取解密密钥失败：需要登录或未授权（401）',
+  keyNetwork: '获取解密密钥失败：网络连接失败',
+  keyMissing: '获取解密密钥失败：找不到密钥（404）',
+  decryptFailed: '解密失败（密钥或 IV 不对）',
+  cipherLength: '加密分片长度不是 16 字节的整数倍，无法解密',
   byterange: '暂不支持按字节范围截取的分片（EXT-X-BYTERANGE）',
   mapByterange: '暂不支持带字节范围的初始化段（EXT-X-MAP）',
   gap: '清单里有缺失的分片（EXT-X-GAP），无法下完整文件',
@@ -73,6 +92,15 @@ export function hlsEncryptedText(method?: string): string {
   const label = method?.trim()
   if (label) return `清单使用了加密（EXT-X-KEY ${label}），不支持加密或 DRM 内容`
   return '清单使用了加密（EXT-X-KEY），不支持加密或 DRM 内容'
+}
+
+/** 取密钥失败时的中文。不包含密钥内容和地址。 */
+export function describeKeyFetchFailure(status: number): string {
+  if (status === 401) return HLS_TEXT.keyUnauthorized
+  if (status === 403) return HLS_TEXT.keyForbidden
+  if (status === 404) return HLS_TEXT.keyMissing
+  if (status === 0) return HLS_TEXT.keyNetwork
+  return `获取解密密钥失败（${status}）`
 }
 
 export function hlsTooBigEstimateText(bytes: number): string {
@@ -128,9 +156,17 @@ export interface HlsVariant {
   separateAudio: boolean
 }
 
+/** 一个分片对应的 AES-128 参数。密钥字节不在这里，下载时再按 keyUrl 去取。 */
+export interface HlsAes128 {
+  keyUrl: string
+  /** 16 字节。有 IV 属性时来自属性，否则是该片 media sequence 的大端表示。 */
+  iv: Uint8Array
+}
+
 export interface HlsSegment {
   url: string
   duration?: number
+  aes128?: HlsAes128
 }
 
 export interface HlsMedia {
@@ -142,6 +178,8 @@ export interface HlsMedia {
   durationSeconds: number
   /** 媒体分片数，不含初始化段。 */
   segmentCount: number
+  /** 至少有一片用了 AES-128。 */
+  aes128: boolean
 }
 
 export type HlsPlaylist =
@@ -189,16 +227,21 @@ export interface HlsSizeAssessment {
   estimatedBytes?: number
 }
 
-/** 体积估算，再加上「声音可能在另一条清单里」的提醒。 */
+/** 体积估算，再加上分轨声音和 AES-128 的提醒。 */
 export function mediaDownloadWarning(input: {
   segmentCount: number
   durationSeconds: number
   bandwidth?: number
   separateAudio?: boolean
+  aes128?: boolean
 }): HlsSizeAssessment | { ok: false; error: string; estimatedBytes?: number } {
   const assessment = assessHlsSize(input)
   if (!assessment.ok) return assessment
-  const warning = joinWarnings([assessment.warning, input.separateAudio ? HLS_TEXT.separateAudio : undefined])
+  const warning = joinWarnings([
+    input.aes128 ? HLS_TEXT.aes128Note : undefined,
+    assessment.warning,
+    input.separateAudio ? HLS_TEXT.separateAudio : undefined,
+  ])
   if (!warning) return assessment
   return assessment.estimatedBytes === undefined
     ? { ok: true, warning }
@@ -327,6 +370,33 @@ function positiveInteger(value: string | undefined): number | undefined {
   return number
 }
 
+/**
+ * 没有 IV 属性时，用分片的 media sequence 当 IV。
+ * 序号按大端放进 16 字节，左边补零。
+ */
+export function ivFromMediaSequence(sequence: number): Uint8Array {
+  const iv = new Uint8Array(16)
+  if (!Number.isSafeInteger(sequence) || sequence < 0) return iv
+  let value = BigInt(sequence)
+  for (let index = 15; index >= 0; index -= 1) {
+    iv[index] = Number(value & 0xffn)
+    value >>= 8n
+  }
+  return iv
+}
+
+/** EXT-X-KEY 的 IV：0x 或 0X 开头，1 到 32 位十六进制，不足 16 字节时左边补零。 */
+export function parseAesIv(value: string): Uint8Array | undefined {
+  const raw = value.trim()
+  if (!/^0[xX][0-9a-fA-F]{1,32}$/.test(raw)) return undefined
+  const hex = raw.slice(2).padStart(32, '0')
+  const iv = new Uint8Array(16)
+  for (let index = 0; index < 16; index += 1) {
+    iv[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16)
+  }
+  return iv
+}
+
 function resolutionOf(value: string | undefined): { width: number; height: number } | undefined {
   if (!value) return undefined
   const match = /^(\d+)x(\d+)$/i.exec(value.trim())
@@ -358,18 +428,59 @@ const IMMEDIATE_REJECT: Record<string, string> = {
   'EXT-X-SKIP': HLS_TEXT.skip,
   'EXT-X-I-FRAMES-ONLY': HLS_TEXT.iframesOnly,
   'EXT-X-IMAGES-ONLY': HLS_TEXT.imagesOnly,
-  'EXT-X-SESSION-KEY': HLS_TEXT.sessionKey,
   'EXT-X-DEFINE': HLS_TEXT.variables,
 }
+
+/** 起始清单里出现这些字样就整份拒绝。匹配时不区分大小写。 */
+const DRM_MARKERS = [
+  'com.apple.streamingkeydelivery',
+  'com.widevine',
+  'com.microsoft.playready',
+  'edef8ba9-79d6-4ace-a3c8-27dcd51d21ed',
+  '9a04f079-9840-4286-ab92-e65be0885f95',
+  'skd://',
+]
 
 function rejectTag(name: string): string | undefined {
   return IMMEDIATE_REJECT[name]
 }
 
-function rejectKey(rest: string): string | undefined {
-  const method = (parseAttributeList(rest).get('METHOD') ?? '').toUpperCase()
-  if (method === 'NONE') return undefined
-  return hlsEncryptedText(method || undefined)
+function containsDrmSignal(text: string): boolean {
+  const lower = text.toLowerCase()
+  return DRM_MARKERS.some((marker) => lower.includes(marker))
+}
+
+interface AppliedKey {
+  method: 'NONE' | 'AES-128'
+  keyUrl?: string
+  /** 有 IV 属性时，这条密钥覆盖的分片都用同一份 IV。 */
+  iv?: Uint8Array
+}
+
+/**
+ * 读一条 EXT-X-KEY 或 EXT-X-SESSION-KEY。
+ * SESSION-KEY 的调用方只看有没有错误，不用它的密钥去解分片。
+ */
+function readKeyTag(rest: string, playlistUrl: string): { ok: true; key: AppliedKey } | { ok: false; error: string } {
+  const attrs = parseAttributeList(rest)
+  const method = (attrs.get('METHOD') ?? '').trim().toUpperCase()
+  if (method === 'NONE') return { ok: true, key: { method: 'NONE' } }
+  if (method.startsWith('SAMPLE-AES')) return { ok: false, error: HLS_TEXT.sampleAes }
+  if (method !== 'AES-128') return { ok: false, error: hlsEncryptedText(method || undefined) }
+  const format = attrs.get('KEYFORMAT')
+  if (format !== undefined && format.trim().toLowerCase() !== 'identity') {
+    return { ok: false, error: HLS_TEXT.keyFormat }
+  }
+  const uri = attrs.get('URI')
+  if (!uri || uri.trim() === '') return { ok: false, error: HLS_TEXT.missingKeyUri }
+  if (uri.includes('{$')) return { ok: false, error: HLS_TEXT.variables }
+  const keyUrl = resolveHttp(playlistUrl, uri)
+  if (!keyUrl) return { ok: false, error: HLS_TEXT.badKeyUri }
+  const ivRaw = attrs.get('IV')
+  if (ivRaw === undefined) return { ok: true, key: { method: 'AES-128', keyUrl } }
+  const iv = parseAesIv(ivRaw)
+  if (!iv) return { ok: false, error: HLS_TEXT.badIv }
+  return { ok: true, key: { method: 'AES-128', keyUrl, iv } }
 }
 
 interface PendingSegment {
@@ -392,6 +503,7 @@ export function parseHlsPlaylist(text: string, playlistUrl: string): HlsPlaylist
   const lines = linesOf(text)
   const hasHeader = lines.some((line) => line.toUpperCase() === '#EXTM3U')
   if (!hasHeader) return fail(HLS_TEXT.notPlaylist)
+  if (containsDrmSignal(text)) return fail(HLS_TEXT.drm)
   const master = lines.some((line) => {
     const name = tagOf(line)?.name
     return name === 'EXT-X-STREAM-INF' || name === 'EXT-X-I-FRAME-STREAM-INF'
@@ -407,9 +519,9 @@ function parseMaster(lines: string[], playlistUrl: string): HlsPlaylist {
     if (!tag) continue
     const rejected = rejectTag(tag.name)
     if (rejected) return fail(rejected)
-    if (tag.name === 'EXT-X-KEY') {
-      const rejectedKey = rejectKey(tag.rest)
-      if (rejectedKey) return fail(rejectedKey)
+    if (tag.name === 'EXT-X-KEY' || tag.name === 'EXT-X-SESSION-KEY') {
+      const read = readKeyTag(tag.rest, playlistUrl)
+      if (!read.ok) return fail(read.error)
       continue
     }
     if (tag.name === 'EXT-X-I-FRAME-STREAM-INF') {
@@ -448,6 +560,9 @@ function parseMedia(lines: string[], playlistUrl: string): HlsPlaylist {
   let sawEndlist = false
   let durationSum = 0
   let pending: PendingSegment | undefined
+  let mediaSequence = 0
+  let sawMediaSequence = false
+  let currentKey: AppliedKey = { method: 'NONE' }
 
   const pushUri = (raw: string): string | undefined => {
     if (raw.includes('{$')) return HLS_TEXT.variables
@@ -458,6 +573,13 @@ function parseMedia(lines: string[], playlistUrl: string): HlsPlaylist {
       segment.duration = pending.duration
       durationSum += pending.duration
     }
+    if (currentKey.method === 'AES-128' && currentKey.keyUrl) {
+      segment.aes128 = {
+        keyUrl: currentKey.keyUrl,
+        iv: currentKey.iv ? new Uint8Array(currentKey.iv) : ivFromMediaSequence(mediaSequence),
+      }
+    }
+    mediaSequence += 1
     segments.push(segment)
     pending = undefined
     return undefined
@@ -472,10 +594,12 @@ function parseMedia(lines: string[], playlistUrl: string): HlsPlaylist {
       if (error) return fail(error)
       continue
     }
-    // 先认加密和明确不支持的标签，避免夹在 EXTINF 和地址之间时被说成「缺少地址」。
-    if (tag.name === 'EXT-X-KEY') {
-      const rejectedKey = rejectKey(tag.rest)
-      if (rejectedKey) return fail(rejectedKey)
+    // 先认密钥和明确不支持的标签，避免夹在 EXTINF 和地址之间时被说成「缺少地址」。
+    if (tag.name === 'EXT-X-KEY' || tag.name === 'EXT-X-SESSION-KEY') {
+      const read = readKeyTag(tag.rest, playlistUrl)
+      if (!read.ok) return fail(read.error)
+      // SESSION-KEY 只是预加载提示，不改变后面分片用的密钥。
+      if (tag.name === 'EXT-X-KEY') currentKey = read.key
       continue
     }
     const rejected = rejectTag(tag.name)
@@ -497,6 +621,14 @@ function parseMedia(lines: string[], playlistUrl: string): HlsPlaylist {
       initUrl = resolved
       continue
     }
+    if (tag.name === 'EXT-X-MEDIA-SEQUENCE') {
+      if (sawMediaSequence || segments.length > 0) return fail(HLS_TEXT.badMediaSequence)
+      const sequence = positiveInteger(tag.rest.trim())
+      if (sequence === undefined) return fail(HLS_TEXT.badMediaSequence)
+      mediaSequence = sequence
+      sawMediaSequence = true
+      continue
+    }
     if (tag.name === 'EXTINF') {
       const comma = tag.rest.indexOf(',')
       const rawDuration = (comma === -1 ? tag.rest : tag.rest.slice(0, comma)).trim()
@@ -512,13 +644,16 @@ function parseMedia(lines: string[], playlistUrl: string): HlsPlaylist {
   if (pending) return fail(HLS_TEXT.missingUri)
   if (!sawEndlist) return fail(HLS_TEXT.live)
   if (segments.length === 0) return fail(HLS_TEXT.empty)
+  const aes128 = segments.some((segment) => segment.aes128 !== undefined)
   if (!initUrl && segments.some((segment) => looksLikeFmp4(segment.url))) return fail(HLS_TEXT.fmp4NoMap)
+  if (aes128 && initUrl) return fail(HLS_TEXT.aesMap)
 
   const media: HlsMedia = {
     segments,
     container: initUrl ? 'mp4' : 'ts',
     durationSeconds: durationSum,
     segmentCount: segments.length,
+    aes128,
   }
   if (initUrl) media.initUrl = initUrl
   return { ok: true, kind: 'media', media }

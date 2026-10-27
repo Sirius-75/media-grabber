@@ -29,7 +29,7 @@ const KIND_LABEL: Record<MediaKind, string> = {
   dash: 'DASH',
 }
 
-const HLS_NOTE = 'HLS 清单，可下载未加密的点播'
+const HLS_NOTE = 'HLS 清单，可下载未加密或 AES-128 点播'
 const OLD_HLS_NOTE = 'HLS 清单，仅支持复制链接'
 const OLD_DASH_NOTE = 'DASH 清单，仅支持复制链接'
 
@@ -76,7 +76,7 @@ export function canOfferDownload(
   return true
 }
 
-/** m3u8 的 http(s) 地址可以下载未加密点播。 */
+/** m3u8 的 http(s) 地址可以下载未加密或标准 AES-128 点播。不支持的加密在下载时给出原因。 */
 export function canOfferHlsDownload(item: Pick<MediaItem, 'url' | 'kind'>): boolean {
   if (item.kind !== 'hls') return false
   const scheme = schemeOf(item.url)
