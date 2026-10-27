@@ -5,15 +5,18 @@
  * 嗅探只观察响应头：新媒体交给 addMedia，206 只交给 fillMediaSize，不在这里另写存储。
  * DOWNLOAD 在 download.ts 里处理：直链交给 chrome.downloads，不改请求头。
  * HLS 和 DASH 的分片下载都转给 offscreen document，不在 service worker 里拼接。
+ * offscreen 只拉取和拼接。进度写入和 chrome.downloads 由 service worker 完成。
  */
 import { listenForDash } from './dash'
 import { listenForDownload } from './download'
 import { listenForHls } from './hls'
+import { listenForOffscreenJobs } from './offscreen-jobs'
 import { addMedia, fillMediaSize, initStore } from './store'
 import { startSniffer } from './sniffer'
 
 initStore()
 listenForDownload()
+listenForOffscreenJobs()
 listenForHls()
 listenForDash()
 

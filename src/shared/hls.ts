@@ -52,6 +52,7 @@ export const HLS_TEXT = {
   forbidden: '服务器拒绝访问（403）',
   unauthorized: '需要登录或未授权（401）',
   network: '网络连接失败',
+  internal: '内部错误，请刷新扩展后重试',
   playlistTooLarge: '清单文件过大，无法解析',
   playlistMissing: '找不到清单（404）',
   busy: '已有下载在进行，请先取消或等待结束',
