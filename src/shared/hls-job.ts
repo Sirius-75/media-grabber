@@ -10,7 +10,15 @@ export const HLS_JOB_STORAGE_KEY = 'hls-jobs'
 /** 同时记住的任务数。再多就丢掉最早的。 */
 export const MAX_REMEMBERED_HLS_JOBS = 20
 
-export const HLS_JOB_PHASES = ['inspecting', 'picking', 'downloading', 'complete', 'failed', 'cancelled'] as const
+export const HLS_JOB_PHASES = [
+  'inspecting',
+  'picking',
+  'downloading',
+  'remuxing',
+  'complete',
+  'failed',
+  'cancelled',
+] as const
 
 export type HlsJobPhase = (typeof HLS_JOB_PHASES)[number]
 

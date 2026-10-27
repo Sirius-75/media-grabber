@@ -16,7 +16,7 @@ Chrome / Edge Manifest V3 扩展，**仅自用**。作用是识别当前页面�
 | 直链用 `chrome.downloads` 下载 | ✅ | |
 | HLS / DASH 只复制清单链接 | ✅ | DASH 仍只复制；HLS 见第 10 节 |
 | 下载未加密 HLS 点播并按顺序拼接 | | ✅ V2-1 |
-| TS 转封装成 mp4 | | ⏳ V2-2 |
+| TS 转封装成 mp4 | | ✅ V2-2 |
 | DASH 下载，以及音视频分轨合并 | | ⏳ V2-3 |
 | 动态插入的 iframe 深层识别、标题命名优化 | | ⏳ |
 
@@ -149,7 +149,7 @@ flowchart LR
 
 1. **DRM / 加密**：带 EME 加密的内容（Netflix、付费平台等）不处理。HLS 只要出现 `#EXT-X-KEY`（AES-128、SAMPLE-AES 等）或 `#EXT-X-SESSION-KEY`，下载会停下来，并用中文说明不支持加密或 DRM。`METHOD=NONE` 不算加密。
 2. **blob: / MSE**：大多数现代播放器（YouTube、B 站等）用 MediaSource 播放，`<video>` 上看到的是 `blob:`，无法直接下载；真实地址往往是分片或清单，只能靠 webRequest 去碰运气。
-3. **分片流**：DASH（mpd）仍然只能复制清单链接。未加密的 HLS 点播可以下载，见第 10 节。直播（没有 `#EXT-X-ENDLIST`）不下载。TS 原样存成 `.ts`，不会转成 mp4。
+3. **分片流**：DASH（mpd）仍然只能复制清单链接。未加密的 HLS 点播可以下载，见第 10 节。直播（没有 `#EXT-X-ENDLIST`）不下载。MPEG-TS 会转封装成 fMP4；转失败或文件太大时仍保存 `.ts`。带 `#EXT-X-MAP` 的 fMP4 只做顺序拼接。
 4. **大小未知**：分块传输、没有 `Content-Length`、或者只看到 Range 片段时，大小显示"未知"或不准。
 5. **防盗链 / 鉴权**：有些链接依赖 Referer、Cookie 或会过期的签名，`chrome.downloads` 下载可能报 403，复制出去用也可能失效。
 6. **Service worker 回收**：SW 被回收期间发生的请求不会丢（事件会唤醒 SW），但内存状态会丢，所以一律用 storage.session。
@@ -251,11 +251,11 @@ flowchart LR
 - [ ] 未加密 HLS 点播：主清单能选清晰度（默认最高），进度条会走，取消有效，关掉 popup 再打开还能看到进度
 - [ ] 直播 m3u8、带 EXT-X-KEY 的 m3u8 会用中文拒绝，不会开始下分片
 - [ ] DASH 仍然只有复制，没有下载按钮
-- [ ] 下载出来的文件：普通 TS 是 `.ts`，带 EXT-X-MAP 的 fMP4 是 `.mp4`（只是顺序拼接，没有转封装）
+- [ ] 下载出来的文件：普通 TS 转封装成功时是 `.mp4`（fMP4，没有重编码）；转封装失败时是 `.ts`，条目上写明可用 VLC 播放。带 EXT-X-MAP 的 fMP4 仍是顺序拼接的 `.mp4`
 
 ## 10. v2
 
-MVP（T1–T8）只把 m3u8 / mpd 列出来供复制。v2 分成三步。**本次只做 V2-1。** V2-2 和 V2-3 先写在这里，不实现。
+MVP（T1–T8）只把 m3u8 / mpd 列出来供复制。v2 分成三步。V2-1 和 V2-2 已做。**V2-3 还没做。**
 
 ### V2-1 HLS 下载（本次）
 
@@ -264,7 +264,7 @@ MVP（T1–T8）只把 m3u8 / mpd 列出来供复制。v2 分成三步。**本�
 1. **解析**（`src/shared/hls.ts`，纯函数）
    - 主清单读出各条 `#EXT-X-STREAM-INF` 的 `BANDWIDTH` / `RESOLUTION`。按带宽从高到低排，默认选最高。
    - 媒体清单读出分片。相对地址用标准 URL 规则拼到清单上（不把清单 query 里的 token 抄到分片上）。
-   - `#EXT-X-MAP` 是 fMP4 初始化段，拼在分片前面。有它就存 `.mp4`，没有就存 `.ts`。
+   - `#EXT-X-MAP` 是 fMP4 初始化段，拼在分片前面。有它就存 `.mp4`。没有的话先按 TS 下载，再由 V2-2 转封装。
    - `#EXT-X-DISCONTINUITY` 允许，分片仍按出现顺序接成一个文件。
 2. **明确拒绝，并给中文原因**
    - 没有 `#EXT-X-ENDLIST` 的直播。
@@ -286,14 +286,27 @@ MVP（T1–T8）只把 m3u8 / mpd 列出来供复制。v2 分成三步。**本�
 
 解析和调度都不依赖 chrome，单测覆盖相对路径、主清单 / 媒体清单、加密拒绝、直播拒绝、重试、取消和体积上限。
 
-### V2-2 TS 转封装成 mp4（未做）
+### V2-2 TS 转封装成 mp4（已完成）
 
-V2-1 把 MPEG-TS 分片原样接成 `.ts`。播放器不一定愿意打开它。下一步评估用 [mux.js](https://github.com/videojs/mux.js)（或同类库）把 TS 转成 mp4：
+MPEG-TS 分片下完后，在 offscreen 文档里转封装成 `.mp4`，不重新编码。带 `EXT-X-MAP` 的 fMP4 仍按 V2-1 顺序拼接，不再转一次。
 
-- 要确认 transmux 是否够用，还是必须重编码（扩展里不能跑 ffmpeg）。
-- 不连续点（`EXT-X-DISCONTINUITY`）的时间戳怎么接。
-- 转封装也在内存里，2GB 上限要一起算。
-- 这一步仍然不处理加密。
+选用 [mux.js](https://github.com/videojs/mux.js) 6.3（Apache-2.0）。它能在扩展页面里把 H.264 + AAC 的 TS 转成 fMP4（`ftyp` + `moov` + 若干 `moof`/`mdat`）。没有加新权限。
+
+没有选用的方案：
+
+- mediabunny 能写出更传统的 mp4，但协议是 MPL-2.0，包也更大。这次不引入。
+- mp4box.js 不解析 MPEG-TS。
+- ffmpeg.wasm 体积大，而且会滑向重编码。扩展里不跑。
+
+行为：
+
+- 每一片单独转。下一片的时间轴接在上一片结束之后，所以 `EXT-X-DISCONTINUITY` 里时间戳归零也不会叠到同一段。
+- 转封装进行时，popup 显示「正在转成 mp4…」，可以取消。
+- 转不出（例如 H.265、AC-3，或 mux.js 抛错）时，整次下载不算失败：保存原来的 `.ts`，条目写「转封装失败，已保存为 .ts，可用 VLC 播放」。
+- 已下载字节超过 1GB 时不再转。转完的 mp4 若超过 2GB 也不采用。两种情况都改存 `.ts`，并说明是为了避免占满内存。
+- 声音在另一条音轨清单里时，仍然只下这一路，不合并。
+
+输出是 fragmented MP4。Chrome、Edge、VLC 通常能播。系统自带播放器能不能播，要在真实 Chrome 里看文件，这一步没有代为验证。
 
 ### V2-3 DASH（mpd）与音视频合并的可行性（未做）
 
@@ -308,6 +321,6 @@ mpd 继续只复制链接。下一步只做评估，不承诺能下：
 
 - 不解密，不绕 DRM，不伪造 Referer 或任何请求头。
 - 不下载直播。
-- 不把 TS 转成 mp4（V2-2）。
+- 不重新编码。mux.js 不认识的编码保留 `.ts`。
 - 不下载 mpd，也不把分开的音轨合并进视频（V2-3）。
-- 不在 service worker 里跑分片循环。
+- 不在 service worker 里跑分片循环或转封装。
