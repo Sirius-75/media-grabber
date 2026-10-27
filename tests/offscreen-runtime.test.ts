@@ -74,7 +74,7 @@ interface Sent {
   key?: string
   filename?: string
   url?: string
-  record?: { phase?: string; message?: string; epoch?: number; variants?: unknown[] }
+  record?: { phase?: string; message?: string; warning?: string; epoch?: number; variants?: unknown[] }
 }
 
 type Listener = (
@@ -112,7 +112,14 @@ function runtimeOnlyChrome(runtime: { onMessage: { addListener(listener: Listene
   })
 }
 
-async function setup(respond?: (message: Sent) => unknown, options?: { failFetch?: boolean }): Promise<Harness> {
+async function setup(
+  respond?: (message: Sent) => unknown,
+  options?: {
+    failFetch?: boolean
+    bodies?: Map<string, string | Uint8Array>
+    statusFor?: (url: string) => number | undefined
+  },
+): Promise<Harness> {
   vi.resetModules()
   const sent: Sent[] = []
   const created: string[] = []
@@ -165,6 +172,15 @@ async function setup(respond?: (message: Sent) => unknown, options?: { failFetch
     if (options?.failFetch) throw new TypeError('Failed to fetch')
     const url = String(input)
     fetches.push({ url, init: init ?? {} })
+    const status = options?.statusFor?.(url)
+    if (status !== undefined && status !== 200) return new Response(null, { status })
+    const body = options?.bodies?.get(url)
+    if (typeof body === 'string') return new Response(body, { status: 200 })
+    if (body) {
+      const buffer = new ArrayBuffer(body.byteLength)
+      new Uint8Array(buffer).set(body)
+      return new Response(buffer, { status: 200 })
+    }
     const text = PLAYLISTS.get(url)
     if (text !== undefined) return new Response(text, { status: 200 })
     return new Response(Uint8Array.of(1, 2, 3, 4), { status: 200 })
@@ -240,6 +256,9 @@ describe('offscreen 源码', () => {
       const text = readFileSync(join(dir, name), 'utf8')
       expect(text, name).not.toMatch(/chrome\.(storage|downloads|tabs)\b/)
     }
+    // 解密模块会被打进 offscreen。它只能用标准 Web API，不能碰扩展 API。
+    const aes = readFileSync(join(process.cwd(), 'src/shared/hls-aes.ts'), 'utf8')
+    expect(aes).not.toMatch(/chrome\./)
   })
 })
 
@@ -323,6 +342,108 @@ describe('offscreen 只使用 chrome.runtime', () => {
     const inspected = await harness.dispatch({ type: 'HLS_OFFSCREEN_INSPECT', playlistUrl: MASTER })
     expect(inspected).toEqual({ ok: false, error: HLS_TEXT.internal })
     expect(warn).toHaveBeenCalledWith('[media-grabber] 读取清单失败', cause)
+  })
+
+  it('AES-128 点播在 offscreen 里解密后保存，且只用 chrome.runtime', async () => {
+    const sample = new Uint8Array(readFileSync('node_modules/mux.js/test/segments/test-middle-pat-pmt.ts'))
+    expect(sample[0]).toBe(0x47)
+    const key = Uint8Array.from({ length: 16 }, (_, index) => index + 3)
+    const iv = new Uint8Array(16)
+    iv[15] = 4
+    const keyBuffer = new ArrayBuffer(key.byteLength)
+    new Uint8Array(keyBuffer).set(key)
+    const ivBuffer = new ArrayBuffer(iv.byteLength)
+    new Uint8Array(ivBuffer).set(iv)
+    const sampleBuffer = new ArrayBuffer(sample.byteLength)
+    new Uint8Array(sampleBuffer).set(sample)
+    const cryptoKey = await crypto.subtle.importKey('raw', keyBuffer, { name: 'AES-CBC' }, false, ['encrypt'])
+    const cipher = new Uint8Array(
+      await crypto.subtle.encrypt({ name: 'AES-CBC', iv: ivBuffer }, cryptoKey, sampleBuffer),
+    )
+    const playlistUrl = 'https://cdn.example/aes/index.m3u8'
+    const keyUrl = 'https://cdn.example/aes/enc.key'
+    const segmentUrl = 'https://cdn.example/aes/seg.ts'
+    const playlist = [
+      '#EXTM3U',
+      '#EXT-X-TARGETDURATION:4',
+      '#EXT-X-MEDIA-SEQUENCE:4',
+      `#EXT-X-KEY:METHOD=AES-128,URI="${keyUrl}"`,
+      '#EXTINF:4,',
+      segmentUrl,
+      '#EXT-X-ENDLIST',
+    ].join('\n')
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const harness = await setup(undefined, {
+      bodies: new Map<string, string | Uint8Array>([
+        [playlistUrl, playlist],
+        [keyUrl, key],
+        [segmentUrl, cipher],
+      ]),
+    })
+    expect(() => {
+      void (chrome as unknown as { storage: { session: unknown } }).storage
+    }).toThrow(/chrome\.storage/)
+
+    const started = await harness.dispatch({
+      type: 'HLS_OFFSCREEN_DOWNLOAD',
+      playlistUrl,
+      mediaUrl: playlistUrl,
+      title: '加密测试',
+      index: 3,
+    })
+    expect(started).toEqual({ ok: true })
+    await waitFor(() =>
+      writes(harness.sent, HLS_JOB_STORAGE_KEY).some((message) => message.record?.phase === 'complete'),
+    )
+
+    const saved = harness.sent.find((message) => message.type === OFFSCREEN_BRIDGE.SAVE_BLOB)
+    expect(saved).toMatchObject({ filename: '加密测试-3.mp4' })
+    const keyHex = [...key].map((part) => part.toString(16).padStart(2, '0')).join('')
+    const dumped = JSON.stringify(harness.sent)
+    expect(dumped).not.toContain(keyHex)
+    expect(dumped).not.toContain(keyUrl)
+    expect(harness.fetches.map((call) => call.url)).toEqual([playlistUrl, keyUrl, segmentUrl])
+    expect(harness.fetches.every((call) => call.init.headers === undefined && call.init.credentials === 'include')).toBe(
+      true,
+    )
+    const downloading = writes(harness.sent, HLS_JOB_STORAGE_KEY).find((message) => message.record?.phase === 'downloading')
+    expect(downloading?.record?.warning).toBe('含 AES-128 加密')
+    expect(warn).not.toHaveBeenCalled()
+    const logged = info.mock.calls.map((call) => JSON.stringify(call))
+    expect(logged.some((line) => line.includes(keyHex))).toBe(false)
+  })
+
+  it('取 AES-128 密钥被拒绝时停下来，不去下分片', async () => {
+    const playlistUrl = 'https://cdn.example/aes/denied.m3u8'
+    const keyUrl = 'https://cdn.example/aes/denied.key'
+    const segmentUrl = 'https://cdn.example/aes/denied.ts'
+    const playlist = [
+      '#EXTM3U',
+      '#EXT-X-TARGETDURATION:4',
+      `#EXT-X-KEY:METHOD=AES-128,URI="${keyUrl}"`,
+      '#EXTINF:4,',
+      segmentUrl,
+      '#EXT-X-ENDLIST',
+    ].join('\n')
+    const harness = await setup(undefined, {
+      bodies: new Map<string, string | Uint8Array>([[playlistUrl, playlist]]),
+      statusFor: (url) => (url === keyUrl ? 403 : undefined),
+    })
+    const started = await harness.dispatch({
+      type: 'HLS_OFFSCREEN_DOWNLOAD',
+      playlistUrl,
+      mediaUrl: playlistUrl,
+    })
+    expect(started).toEqual({ ok: true })
+    await waitFor(() =>
+      writes(harness.sent, HLS_JOB_STORAGE_KEY).some((message) => message.record?.phase === 'failed'),
+    )
+    const failed = writes(harness.sent, HLS_JOB_STORAGE_KEY).find((message) => message.record?.phase === 'failed')
+    expect(failed?.record?.message).toBe(HLS_TEXT.keyForbidden)
+    expect(harness.sent.some((message) => message.type === OFFSCREEN_BRIDGE.SAVE_BLOB)).toBe(false)
+    expect(harness.fetches.map((call) => call.url)).toEqual([playlistUrl, keyUrl])
+    expect(harness.fetches.every((call) => call.init.headers === undefined)).toBe(true)
   })
 
   it('拉清单的网络错误仍然说网络连接失败', async () => {

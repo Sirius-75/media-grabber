@@ -6,12 +6,15 @@
  * 进度和保存文件通过 chrome.runtime 交给 service worker。
  * 这个页面除了 chrome.runtime，不使用别的扩展 API。
  * MPEG-TS 在保存前转封装成 mp4。转失败就仍保存原来的 .ts。
- * 带 EXT-X-MAP 的 fMP4 不再转一次。fetch 不设置请求头。
+ * 带 EXT-X-MAP 的 fMP4 不再转一次。
+ * 标准 AES-128 在这个页面里用 crypto.subtle 解密，密钥和明文只留在内存。
+ * fetch 不设置请求头。HLS 和 DASH 不伪造 Referer。
  * B 站分轨也在这里拉取。页面 Referer 由 service worker 在下载前准备好，这个页面不加请求头。
  */
 
 import { describeInterruptReason } from '../shared/interrupt-reason'
 import { buildDownloadFilename } from '../shared/filename'
+import { decryptDownloadedParts, loadAes128Keys } from '../shared/hls-aes'
 import { downloadSegmentsInOrder } from '../shared/hls-download'
 import { fetchPlaylistText, fetchSegmentBytes } from '../shared/hls-fetch'
 import { planHlsSave, type HlsSavePlan } from '../shared/hls-remux'
@@ -156,6 +159,7 @@ async function inspect(playlistUrl: string): Promise<unknown> {
     const assessment = mediaDownloadWarning({
       segmentCount: parsed.media.segmentCount,
       durationSeconds: parsed.media.durationSeconds,
+      aes128: parsed.media.aes128,
     })
     if (!assessment.ok) {
       await writeJob(playlistUrl, job({ phase: 'failed', message: assessment.error, completed: 0, total: 0 }))
@@ -262,6 +266,7 @@ async function runDownload(request: DownloadRequest, controller: AbortController
       durationSeconds: media.durationSeconds,
       bandwidth,
       separateAudio,
+      aes128: media.aes128,
     })
     if (!assessment.ok) {
       await failJob(key, controller, assessment.error)
@@ -273,6 +278,29 @@ async function runDownload(request: DownloadRequest, controller: AbortController
     for (const segment of media.segments) urls.push(segment.url)
     const total = urls.length
     const initCount = media.initUrl ? 1 : 0
+
+    // 先取密钥。401/403 或长度不对就停，不去下分片，也不改请求头。
+    let aesKeys: Map<string, Uint8Array> | undefined
+    if (media.aes128) {
+      const loaded = await loadAes128Keys({ segments: media.segments, signal })
+      if (!stillCurrent(controller)) return
+      if (!loaded.ok) {
+        await writeJob(
+          key,
+          job({
+            phase: loaded.cancelled ? 'cancelled' : 'failed',
+            message: loaded.error,
+            completed: 0,
+            total: 0,
+            warning: assessment.warning,
+          }),
+          controller,
+        )
+        return
+      }
+      aesKeys = loaded.keys
+    }
+
     let completed = 0
     await writeJob(
       key,
@@ -327,11 +355,38 @@ async function runDownload(request: DownloadRequest, controller: AbortController
       return
     }
 
+    let plainParts = result.parts
+    if (aesKeys) {
+      const decrypted = await decryptDownloadedParts({
+        parts: result.parts,
+        initCount,
+        segments: media.segments,
+        keys: aesKeys,
+        signal,
+      })
+      if (!stillCurrent(controller)) return
+      if (!decrypted.ok) {
+        await writeJob(
+          key,
+          job({
+            phase: decrypted.cancelled ? 'cancelled' : 'failed',
+            message: decrypted.error,
+            completed,
+            total,
+            warning: assessment.warning,
+          }),
+          controller,
+        )
+        return
+      }
+      plainParts = decrypted.parts
+    }
+
     let planned: HlsSavePlan
     try {
       planned = await planHlsSave({
         container: media.container,
-        parts: result.parts,
+        parts: plainParts,
         transmux: transmuxTsSegment,
         signal,
         // 每片转完让出一次事件循环，取消才能插进来。转封装本身仍在这个页面里，不进 service worker。
@@ -367,7 +422,7 @@ async function runDownload(request: DownloadRequest, controller: AbortController
         ok: true,
         ext: 'ts',
         mime: 'video/mp2t',
-        parts: result.parts,
+        parts: plainParts,
         message: HLS_TEXT.remuxFallback,
       }
     }

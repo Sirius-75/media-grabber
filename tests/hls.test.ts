@@ -8,8 +8,10 @@ import {
   describeFetchFailure,
   describePlaylistStatus,
   hlsEncryptedText,
+  ivFromMediaSequence,
   mediaDownloadWarning,
   parseAttributeList,
+  parseAesIv,
   parseHlsPlaylist,
   variantLabel,
 } from '../src/shared/hls'
@@ -133,17 +135,49 @@ describe('拒绝', () => {
   it('不是清单、直播、加密、字节范围、缺口、多个初始化段、fMP4 缺 MAP', () => {
     expect(parseHlsPlaylist('hello', base)).toEqual({ ok: false, error: HLS_TEXT.notPlaylist })
     expect(parseHlsPlaylist('#EXTM3U\n#EXTINF:1,\na.ts\n', base)).toEqual({ ok: false, error: HLS_TEXT.live })
-    expect(media('#EXT-X-KEY:METHOD=AES-128,URI="https://cdn.example/key"\n#EXTINF:1,\na.ts')).toEqual({
+    expect(media('#EXT-X-KEY:METHOD=SAMPLE-AES,URI="https://cdn.example/key"\n#EXTINF:1,\na.ts')).toEqual({
       ok: false,
-      error: hlsEncryptedText('AES-128'),
+      error: HLS_TEXT.sampleAes,
     })
-    expect(media('#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://x"\n#EXTINF:1,\na.ts')).toEqual({
+    expect(media('#EXT-X-KEY:METHOD=FOO,URI="https://cdn.example/key"\n#EXTINF:1,\na.ts')).toEqual({
       ok: false,
-      error: hlsEncryptedText('SAMPLE-AES'),
+      error: hlsEncryptedText('FOO'),
     })
-    expect(media('#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES,URI="skd://x"\n#EXTINF:1,\na.ts')).toEqual({
+    expect(media('#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,URI="https://cdn.example/key"\n#EXTINF:1,\na.ts')).toEqual({
       ok: false,
-      error: HLS_TEXT.sessionKey,
+      error: HLS_TEXT.sampleAes,
+    })
+    expect(media('#EXT-X-KEY:METHOD=AES-128,URI="https://cdn.example/key",KEYFORMAT="org.w3.clearkey"\n#EXTINF:1,\na.ts')).toEqual({
+      ok: false,
+      error: HLS_TEXT.keyFormat,
+    })
+    expect(media('#EXT-X-KEY:METHOD=AES-128,URI="skd://x"\n#EXTINF:1,\na.ts')).toEqual({
+      ok: false,
+      error: HLS_TEXT.drm,
+    })
+    expect(
+      media(
+        '#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES,URI="https://cdn.example/key",KEYFORMAT="com.apple.streamingkeydelivery"\n#EXTINF:1,\na.ts',
+      ),
+    ).toEqual({
+      ok: false,
+      error: HLS_TEXT.drm,
+    })
+    expect(
+      media(
+        '#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES,URI="https://cdn.example/key",KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"\n#EXTINF:1,\na.ts',
+      ),
+    ).toEqual({
+      ok: false,
+      error: HLS_TEXT.drm,
+    })
+    expect(
+      media(
+        '#EXT-X-KEY:METHOD=AES-128,URI="https://cdn.example/key",KEYFORMAT="urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95"\n#EXTINF:1,\na.ts',
+      ),
+    ).toEqual({
+      ok: false,
+      error: HLS_TEXT.drm,
     })
     expect(media('#EXTINF:1,\n#EXT-X-BYTERANGE:1000@0\na.ts')).toEqual({ ok: false, error: HLS_TEXT.byterange })
     expect(media('#EXT-X-GAP\n#EXTINF:1,\na.ts')).toEqual({ ok: false, error: HLS_TEXT.gap })
@@ -207,6 +241,14 @@ describe('体积', () => {
     })
     expect(audio.ok).toBe(true)
     if (audio.ok) expect(audio.warning).toBe(HLS_TEXT.separateAudio)
+
+    const encrypted = mediaDownloadWarning({
+      segmentCount: 2,
+      durationSeconds: 4,
+      aes128: true,
+    })
+    expect(encrypted.ok).toBe(true)
+    if (encrypted.ok) expect(encrypted.warning).toBe(HLS_TEXT.aes128Note)
   })
 
   it('保存时沿用现有文件名，TS 用 .ts，fMP4 用 .mp4', () => {
@@ -224,5 +266,147 @@ describe('体积', () => {
         ext: 'mp4',
       }),
     ).toBe('index.mp4')
+  })
+})
+
+describe('AES-128 清单', () => {
+  const base = 'https://cdn.example/hls/v/index.m3u8?token=abc'
+
+  function bytesOf(value: Uint8Array | undefined): number[] {
+    return value ? [...value] : []
+  }
+
+  it('密钥轮换、显式 IV、默认 media sequence，以及 METHOD=NONE 之后不再加密', () => {
+    const text = [
+      '#EXTM3U',
+      '#EXT-X-VERSION:3',
+      '#EXT-X-TARGETDURATION:4',
+      '#EXT-X-MEDIA-SEQUENCE:9',
+      '#EXT-X-KEY:METHOD=AES-128,URI="enc.key",KEYFORMAT="identity"',
+      '#EXTINF:2,',
+      'a.ts',
+      '#EXTINF:2,',
+      'b.ts',
+      '#EXT-X-KEY:METHOD=AES-128,URI="https://keys.example/k2",IV=0x11',
+      '#EXTINF:2,',
+      'c.ts',
+      '#EXT-X-KEY:METHOD=NONE',
+      '#EXTINF:2,',
+      'd.ts',
+      '#EXT-X-KEY:METHOD=AES-128,URI="enc.key",KEYFORMAT="Identity"',
+      '#EXTINF:2,',
+      'e.ts',
+      '#EXT-X-ENDLIST',
+    ].join('\n')
+    const parsed = parseHlsPlaylist(text, base)
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok || parsed.kind !== 'media') return
+    expect(parsed.media.aes128).toBe(true)
+    expect(parsed.media.container).toBe('ts')
+    const segments = parsed.media.segments
+    expect(segments.map((segment) => segment.url)).toEqual([
+      'https://cdn.example/hls/v/a.ts',
+      'https://cdn.example/hls/v/b.ts',
+      'https://cdn.example/hls/v/c.ts',
+      'https://cdn.example/hls/v/d.ts',
+      'https://cdn.example/hls/v/e.ts',
+    ])
+    expect(segments[0]?.aes128?.keyUrl).toBe('https://cdn.example/hls/v/enc.key')
+    expect(bytesOf(segments[0]?.aes128?.iv)).toEqual(bytesOf(ivFromMediaSequence(9)))
+    expect(segments[1]?.aes128?.keyUrl).toBe('https://cdn.example/hls/v/enc.key')
+    expect(bytesOf(segments[1]?.aes128?.iv)).toEqual(bytesOf(ivFromMediaSequence(10)))
+    expect(segments[0]?.aes128?.iv).not.toBe(segments[1]?.aes128?.iv)
+    expect(segments[2]?.aes128?.keyUrl).toBe('https://keys.example/k2')
+    expect(bytesOf(segments[2]?.aes128?.iv)).toEqual(bytesOf(parseAesIv('0x11')))
+    expect(segments[3]?.aes128).toBeUndefined()
+    expect(segments[4]?.aes128?.keyUrl).toBe('https://cdn.example/hls/v/enc.key')
+    expect(bytesOf(segments[4]?.aes128?.iv)).toEqual(bytesOf(ivFromMediaSequence(13)))
+  })
+
+  it('同一条显式 IV 覆盖后面的分片，相对密钥地址不继承清单 query', () => {
+    const text = [
+      '#EXTM3U',
+      '#EXT-X-KEY:METHOD=AES-128,URI="keys/a.key",IV=0X0000000000000000000000000000002A',
+      '#EXTINF:1,',
+      'a.ts',
+      '#EXTINF:1,',
+      'b.ts',
+      '#EXT-X-ENDLIST',
+    ].join('\n')
+    const parsed = parseHlsPlaylist(text, base)
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok || parsed.kind !== 'media') return
+    expect(parsed.media.segments[0]?.aes128?.keyUrl).toBe('https://cdn.example/hls/v/keys/a.key')
+    expect(parsed.media.segments[0]?.aes128?.keyUrl).not.toContain('token')
+    const iv = bytesOf(parsed.media.segments[0]?.aes128?.iv)
+    expect(iv[15]).toBe(0x2a)
+    expect(iv.slice(0, 15).every((part) => part === 0)).toBe(true)
+    expect(bytesOf(parsed.media.segments[1]?.aes128?.iv)).toEqual(iv)
+  })
+
+  it('主清单里的 SAMPLE-AES 会话密钥仍然拒绝，AES-128 会话密钥不影响选清晰度', () => {
+    const sample = [
+      '#EXTM3U',
+      '#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES,URI="https://cdn.example/k"',
+      '#EXT-X-STREAM-INF:BANDWIDTH=1000',
+      'media.m3u8',
+    ].join('\n')
+    expect(parseHlsPlaylist(sample, base)).toEqual({ ok: false, error: HLS_TEXT.sampleAes })
+    const allowed = [
+      '#EXTM3U',
+      '#EXT-X-SESSION-KEY:METHOD=AES-128,URI="https://cdn.example/k",KEYFORMAT="identity"',
+      '#EXT-X-STREAM-INF:BANDWIDTH=1000',
+      'media.m3u8',
+    ].join('\n')
+    const parsed = parseHlsPlaylist(allowed, base)
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok || parsed.kind !== 'master') return
+    expect(parsed.variants).toHaveLength(1)
+  })
+
+  it('EXT-X-SESSION-KEY 的 AES-128 不拿来解密分片', () => {
+    const text = [
+      '#EXTM3U',
+      '#EXT-X-SESSION-KEY:METHOD=AES-128,URI="https://cdn.example/preload.key"',
+      '#EXTINF:1,',
+      'a.ts',
+      '#EXT-X-ENDLIST',
+    ].join('\n')
+    const parsed = parseHlsPlaylist(text, base)
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok || parsed.kind !== 'media') return
+    expect(parsed.media.aes128).toBe(false)
+    expect(parsed.media.segments[0]?.aes128).toBeUndefined()
+  })
+
+  it('带初始化段的 AES-128、坏 IV、非 http 密钥、直播仍然拒绝', () => {
+    const end = '#EXT-X-ENDLIST'
+    expect(
+      parseHlsPlaylist(
+        `#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="https://cdn.example/k"\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:1,\na.ts\n${end}\n`,
+        base,
+      ),
+    ).toEqual({ ok: false, error: HLS_TEXT.aesMap })
+    expect(
+      parseHlsPlaylist(
+        `#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="https://cdn.example/k",IV=xyz\n#EXTINF:1,\na.ts\n${end}\n`,
+        base,
+      ),
+    ).toEqual({ ok: false, error: HLS_TEXT.badIv })
+    expect(
+      parseHlsPlaylist(
+        `#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="data:application/octet-stream,abcd"\n#EXTINF:1,\na.ts\n${end}\n`,
+        base,
+      ),
+    ).toEqual({ ok: false, error: HLS_TEXT.badKeyUri })
+    expect(
+      parseHlsPlaylist('#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="https://cdn.example/k"\n#EXTINF:1,\na.ts\n', base),
+    ).toEqual({ ok: false, error: HLS_TEXT.live })
+    expect(
+      parseHlsPlaylist(
+        `#EXTM3U\n#EXTINF:1,\n#EXT-X-BYTERANGE:100@0\na.ts\n${end}\n`,
+        base,
+      ),
+    ).toEqual({ ok: false, error: HLS_TEXT.byterange })
   })
 })

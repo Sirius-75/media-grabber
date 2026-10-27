@@ -52,7 +52,7 @@ const hls = item({
   kind: 'hls',
   ext: 'm3u8',
   downloadable: false,
-  note: 'HLS 清单，可下载未加密的点播',
+  note: 'HLS 清单，可下载未加密或 AES-128 点播',
 })
 
 const dash = item({
@@ -121,7 +121,7 @@ describe('展示文案', () => {
 
   it('不可下载的条目带说明，直链没有多余说明', () => {
     expect(itemNote(video)).toBeUndefined()
-    expect(itemNote(hls)).toBe('HLS 清单，可下载未加密的点播')
+    expect(itemNote(hls)).toBe('HLS 清单，可下载未加密或 AES-128 点播')
     expect(itemNote(dash)).toBe('DASH 清单，可下载未加密的点播')
     expect(canOfferDashDownload(dash)).toBe(true)
     expect(canOfferDashDownload(hls)).toBe(false)
@@ -208,7 +208,7 @@ describe('列表', () => {
 
     const notes = [...list.querySelectorAll('.note')].map((node) => node.textContent)
     expect(notes).toEqual([
-      'HLS 清单，可下载未加密的点播',
+      'HLS 清单，可下载未加密或 AES-128 点播',
       'DASH 清单，可下载未加密的点播',
       'blob 地址，无法直接下载',
       'data 地址，无法直接下载',
@@ -391,8 +391,43 @@ describe('HLS 下载界面', () => {
     )
   })
 
-  it('旧的「仅复制」说明改成可以下载未加密点播', () => {
-    expect(itemNote({ ...hls, note: 'HLS 清单，仅支持复制链接' })).toBe('HLS 清单，可下载未加密的点播')
+  it('AES-128 清单仍可下载，备注写含加密；不支持的加密只显示原因', () => {
+    const list = document.createElement('ul')
+    renderList(list, [hls])
+    expect(canOfferHlsDownload(hls)).toBe(true)
+    expect(list.querySelector('.note')?.textContent).toBe('HLS 清单，可下载未加密或 AES-128 点播')
+    expect(list.querySelector('[data-action="hls-download"]')).toBeTruthy()
+
+    renderList(list, [hls], undefined, {
+      [hls.url]: {
+        phase: 'downloading',
+        message: '已下载 1/2',
+        completed: 1,
+        total: 2,
+        warning: '含 AES-128 加密',
+        updatedAt: 1,
+      },
+    })
+    expect(list.querySelector('.warning')?.textContent).toBe('含 AES-128 加密')
+    expect(list.querySelector('.status')?.textContent).toBe('已下载 1/2')
+    expect(list.querySelector('[data-action="hls-cancel"]')).toBeTruthy()
+
+    renderList(list, [hls], undefined, {
+      [hls.url]: {
+        phase: 'failed',
+        message: '清单使用了 SAMPLE-AES，不支持这种加密',
+        completed: 0,
+        total: 0,
+        updatedAt: 2,
+      },
+    })
+    expect(list.querySelector('.status')?.textContent).toBe('清单使用了 SAMPLE-AES，不支持这种加密')
+    expect(list.querySelector('[data-action="hls-download"]')).toBeTruthy()
+    expect(list.querySelector('.warning')).toBeNull()
+  })
+
+  it('旧的「仅复制」说明改成可以下载点播', () => {
+    expect(itemNote({ ...hls, note: 'HLS 清单，仅支持复制链接' })).toBe('HLS 清单，可下载未加密或 AES-128 点播')
     expect(itemNote({ ...dash, note: 'DASH 清单，仅支持复制链接' })).toBe('DASH 清单，可下载未加密的点播')
   })
 })

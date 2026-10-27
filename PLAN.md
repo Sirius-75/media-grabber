@@ -2,7 +2,7 @@
 
 Chrome / Edge Manifest V3 扩展，**仅自用**。作用是识别当前页面里的音视频资源，列出来供复制或下载。
 
-> 不做的事：不破解 DRM（Widevine/PlayReady 等），不绕过付费墙、登录或会员限制。遇到加密内容只标注一下，不做处理。除第 11 节的 B 站分轨下载外，不修改请求头。
+> 不做的事：不破解 DRM（Widevine、PlayReady、FairPlay 等），不绕过付费墙、登录或会员限制。HLS 标准 AES-128（密钥是普通的 http 或 https 文件，16 字节）可以在内存里解密。SAMPLE-AES 和任何 DRM 仍然拒绝。除第 12 节的 B 站分轨下载外，不修改请求头。
 
 ## 1. MVP 范围
 
@@ -18,7 +18,8 @@ Chrome / Edge Manifest V3 扩展，**仅自用**。作用是识别当前页面�
 | 下载未加密 HLS 点播并按顺序拼接 | | ✅ V2-1 |
 | TS 转封装成 mp4 | | ✅ V2-2 |
 | 下载未加密 DASH 点播（音视频分文件保存） | | ✅ V2-3 |
-| 下载 B 站当前页能播的分轨 fMP4（视频、音频分开存） | | ✅ V3-2，见第 11 节 |
+| 下载标准 AES-128 的 HLS 点播 | | ✅ V3-1，见第 11 节 |
+| 下载 B 站当前页能播的分轨 fMP4（视频、音频分开存） | | ✅ V3-2，见第 12 节 |
 | 动态插入的 iframe 深层识别、标题命名优化 | | ⏳ |
 
 ## 2. 技术栈
@@ -81,7 +82,7 @@ action: { default_popup: "src/popup/index.html" }
 | `tabs` | popup 要拿到当前 tab 的 id 和标题（标题用于生成文件名）；后台还要监听 `tabs.onRemoved` 和导航事件来清理数据。 |
 | `clipboardWrite` | popup 里用 `navigator.clipboard.writeText` 复制链接。popup 有用户手势时通常不需要这个权限，这里声明上是为了保险，可选。 |
 | `offscreen` | v2 才加。HLS / DASH 分片要在扩展页面里拼成 Blob。这个长任务不能放在会被回收的 service worker 里，所以用 `chrome.offscreen` 开一个不显示的文档。这个文档只能使用 `chrome.runtime`，会话存储和 `chrome.downloads` 仍由 service worker 调用。理由见第 10 节。 |
-| `declarativeNetRequestWithHostAccess` | 只用于 B 站分轨下载。service worker 用 session 规则，在下载开始前给「正在下载的那一个媒体主机」补上页面的 Referer。它比 `declarativeNetRequest` 窄：改请求头还依赖已经声明的 `<all_urls>` 主机权限。不用于 HLS、DASH 和普通直链。边界见第 11 节。 |
+| `declarativeNetRequestWithHostAccess` | 只用于 B 站分轨下载。service worker 用 session 规则，在下载开始前给「正在下载的那一个媒体主机」补上页面的 Referer。它比 `declarativeNetRequest` 窄：改请求头还依赖已经声明的 `<all_urls>` 主机权限。不用于 HLS（含 AES-128 取密钥）、DASH 和普通直链。边界见第 12 节。 |
 
 不申请的权限：`declarativeNetRequest`（主机权限已经是 `<all_urls>`，session 规则的 `modifyHeaders` 用更窄的 `declarativeNetRequestWithHostAccess`）、`scripting`（用静态 content script 就够了）、`cookies`、`debugger`。
 
@@ -149,9 +150,9 @@ flowchart LR
 
 ## 7. 已知限制
 
-1. **DRM / 加密**：带 EME 加密的内容（Netflix、付费平台等）不处理。HLS 只要出现 `#EXT-X-KEY`（AES-128、SAMPLE-AES 等）或 `#EXT-X-SESSION-KEY`，下载会停下来，并用中文说明不支持加密或 DRM。`METHOD=NONE` 不算加密。
-2. **blob: / MSE**：大多数现代播放器（YouTube 等）用 MediaSource 播放，`<video>` 上看到的是 `blob:`，无法直接下载；真实地址往往是分片或清单，只能靠 webRequest 去碰运气。B 站视频页没有 `.mpd`，分轨地址从页面脚本或 `*.bilivideo.com` 上的单个 `.m4s` 读取，见第 11 节。
-3. **分片流**：未加密的 HLS 点播和未加密的 DASH 静态点播可以下载，见第 10 节。DASH 的视频和音频通常是两条 fMP4，扩展会存成两个文件，不会合成一个。直播、加密清单、多 Period、SegmentBase 不下载。MPEG-TS 会转封装成 fMP4；转失败或文件太大时仍保存 `.ts`。带 `#EXT-X-MAP` 的 fMP4 只做顺序拼接。
+1. **DRM / 加密**：带 EME 加密的内容（Netflix、付费平台等）不处理。HLS 的标准 AES-128（`METHOD=AES-128`，密钥格式是 identity 或缺省，密钥地址是 http 或 https）可以下载，见第 11 节。`METHOD=NONE` 不算加密。SAMPLE-AES、`KEYFORMAT` 不是 identity、清单里出现 FairPlay / Widevine / PlayReady 的迹象，都会用中文拒绝。密钥要能用普通请求拿到；401、403 或网络失败就停，不伪造请求头。
+2. **blob: / MSE**：大多数现代播放器（YouTube 等）用 MediaSource 播放，`<video>` 上看到的是 `blob:`，无法直接下载；真实地址往往是分片或清单，只能靠 webRequest 去碰运气。B 站视频页没有 `.mpd`，分轨地址从页面脚本或 `*.bilivideo.com` 上的单个 `.m4s` 读取，见第 12 节。
+3. **分片流**：未加密的 HLS 点播、标准 AES-128 的 HLS 点播，以及未加密的 DASH 静态点播可以下载，见第 10、11 节。DASH 的视频和音频通常是两条 fMP4，扩展会存成两个文件，不会合成一个。直播、SAMPLE-AES、DRM、多 Period、SegmentBase 不下载。AES-128 解密后的 MPEG-TS 会转封装成 fMP4；转失败或文件太大时仍保存 `.ts`。带 `#EXT-X-MAP` 的 fMP4 只做顺序拼接，这种清单如果同时还是 AES-128，会拒绝。B 站分轨见第 12 节，和 HLS 解密不是一条路径。
 4. **大小未知**：分块传输、没有 `Content-Length`、或者只看到 Range 片段时，大小显示"未知"或不准。
 5. **防盗链 / 鉴权**：有些链接依赖 Referer、Cookie 或会过期的签名，`chrome.downloads` 下载可能报 403，复制出去用也可能失效。普通直链、HLS 和 DASH 仍然不改请求头。只有 B 站分轨下载会给扩展自己的请求补上页面 Referer，而且只下页面现在就能播的内容。链接过期后要先刷新页面再下载。
 6. **Service worker 回收**：SW 被回收期间发生的请求不会丢（事件会唤醒 SW），但内存状态会丢，所以一律用 storage.session。
@@ -234,7 +235,8 @@ flowchart LR
 |---|---|---|---|
 | A | `<video src>` 直链 mp4 | MDN `<video>` 元素文档页的示例；或者本地 `test.html` 引用 Big Buck Bunny 的公开 mp4 | DOM + 网络各识别一次但合并为一条，显示大小，能下载 |
 | B | `<audio>` mp3 | MDN `<audio>` 文档示例 | 识别为音频，能下载 |
-| C1 | HLS m3u8 | hls.js 官方 demo 页（`hlsjs.video-dev.org/demo`），或 Apple 的 HLS 示例流 | 出现一条 HLS 清单，`.ts` 分片不出现在列表里。未加密点播可以下载；主清单要先选清晰度。直播、带 KEY 的清单不能下 |
+| C1 | HLS m3u8 | hls.js 官方 demo 页（`hlsjs.video-dev.org/demo`），或 Apple 的 HLS 示例流 | 出现一条 HLS 清单，`.ts` 分片不出现在列表里。未加密点播可以下载；主清单要先选清晰度。直播、SAMPLE-AES、DRM 不能下 |
+| C3 | AES-128 HLS | 自己用 ffmpeg 生成，见下面的步骤。这里不写死公开地址，避免链接失效后变成错的 | 清单标成可下载，备注里有「含 AES-128 加密」。下完是 `.mp4`（转失败则是 `.ts`）。把密钥地址改成 403 时，中文提示获取密钥失败，不会改请求头 |
 | C2 | DASH mpd | dash.js 参考播放器（`reference.dashif.org/dash.js`） | 出现一条 DASH，`.m4s` 不出现。未加密静态点播可以下载；多种清晰度先选，默认最高视频。音视频分开时存两个文件。直播、加密、SegmentBase 会用中文拒绝 |
 | D | 多个 `<source>` 子元素 | 本地 `tests/pages/sources.html`（webm + mp4 两个 source） | 两个 source 都列出来 |
 | E | blob / MSE 播放 | YouTube 任意公开视频 | DOM 条目标注 blob、不可下载；不报错 |
@@ -252,10 +254,21 @@ flowchart LR
 - [ ] 扩展的 errors 页面没有报错
 - [ ] 访问带 DRM 的页面时扩展不做任何绕过，只按普通资源规则列出能看到的 URL
 - [ ] 未加密 HLS 点播：主清单能选清晰度（默认最高），进度条会走，取消有效，关掉 popup 再打开还能看到进度
-- [ ] 直播 m3u8、带 EXT-X-KEY 的 m3u8 会用中文拒绝，不会开始下分片
+- [ ] 直播 m3u8、SAMPLE-AES、非 identity 的 KEYFORMAT、带 Widevine / PlayReady / FairPlay 迹象的清单会用中文拒绝，不会开始下分片
+- [ ] 标准 AES-128 点播可以下载。条目备注写「含 AES-128 加密」。密钥返回 401、403 或不是 16 字节时，用中文停下来，不伪造 Referer 或其他请求头
 - [ ] 未加密的 DASH 点播：多清晰度能选（默认最高视频），进度条会走，取消有效。视频和音频分开时保存两个文件，并写明不能合成。直播、ContentProtection、多个 Period、SegmentBase 会用中文拒绝
-- [ ] 下载出来的文件：普通 TS 转封装成功时是 `.mp4`（fMP4，没有重编码，文件头时长是实际总时长）；转封装失败时是 `.ts`，条目上写明可用 VLC 播放。带 EXT-X-MAP 的 fMP4 仍是顺序拼接的 `.mp4`
-- [ ] B 站（第 11 节）：只下当前页能播的内容，不处理会员专享。下载进行时，在 service worker 控制台执行 `chrome.declarativeNetRequest.getSessionRules()`，应看到 id 在 910001–910032 的规则：`tabIds` 为 `[-1]`，`requestDomains` 只有正在下载的媒体主机，请求头只有 Referer，值是视频页的 origin 加 `/`。成功、失败、取消或关掉后台页之后，这些规则消失。用户正常浏览不受影响。HLS、DASH 和普通直链下载不会多出这类规则
+- [ ] 下载出来的文件：普通 TS 转封装成功时是 `.mp4`（fMP4，没有重编码，文件头时长是实际总时长）；转封装失败时是 `.ts`，条目上写明可用 VLC 播放。带 EXT-X-MAP 的 fMP4 仍是顺序拼接的 `.mp4`。AES-128 解密成功但转封装失败时，保存的 `.ts` 是明文，不是密文
+- [ ] B 站（第 12 节）：只下当前页能播的内容，不处理会员专享。下载进行时，在 service worker 控制台执行 `chrome.declarativeNetRequest.getSessionRules()`，应看到 id 在 910001–910032 的规则：`tabIds` 为 `[-1]`，`requestDomains` 只有正在下载的媒体主机，请求头只有 Referer，值是视频页的 origin 加 `/`。成功、失败、取消或关掉后台页之后，这些规则消失。用户正常浏览不受影响。HLS（含取 AES-128 密钥）、DASH 和普通直链下载不会多出这类规则
+
+自己做一条 AES-128 测试流（在空目录里执行；需要 ffmpeg）。没有写死公开测试地址。
+
+```bash
+openssl rand 16 > enc.key
+ffmpeg -f lavfi -i testsrc=size=320x180:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 6 -c:v libx264 -pix_fmt yuv420p -c:a aac -hls_time 2 -hls_playlist_type vod -hls_enc 1 -hls_enc_key enc.key -hls_enc_key_url enc.key -hls_segment_filename "seg%03d.ts" index.m3u8
+python -m http.server 8080
+```
+
+再写一个本地页面，里面放 `<video src="http://127.0.0.1:8080/index.m3u8" controls></video>`，用浏览器打开。Chrome 不一定能直接播 m3u8，但扩展会认出这个地址。弹窗里点下载。密钥地址是相对的 `enc.key`，会解析成 `http://127.0.0.1:8080/enc.key`。
 
 ## 10. v2
 
@@ -272,7 +285,7 @@ MVP（T1–T8）只把 m3u8 / mpd 列出来供复制。v2 分成三步。V2-1、
    - `#EXT-X-DISCONTINUITY` 允许，分片仍按出现顺序接成一个文件。
 2. **明确拒绝，并给中文原因**
    - 没有 `#EXT-X-ENDLIST` 的直播。
-   - 任何 `#EXT-X-KEY`（`METHOD=NONE` 除外）和 `#EXT-X-SESSION-KEY`。AES-128、SAMPLE-AES 都不做。项目约定不处理加密或 DRM。
+   - 任何 `#EXT-X-KEY`（`METHOD=NONE` 除外）和 `#EXT-X-SESSION-KEY`。AES-128、SAMPLE-AES 都不做。项目当时约定不处理加密或 DRM。标准 AES-128 后来在 V3-1 做了，见第 11 节。
    - `#EXT-X-BYTERANGE`、`#EXT-X-GAP`、`#EXT-X-SKIP`、关键帧预览、图片清单、中途更换初始化段、看起来像 fMP4 但没有 MAP。广告打点标签忽略。
 3. **下载引擎**
    - 长任务放在 `chrome.offscreen` 的文档里（`src/offscreen/`），不放在 service worker。因此 manifest 增加 `offscreen` 权限。
@@ -351,18 +364,47 @@ mux.js 的 Transmuxer 只吃 MPEG-TS（以及 AAC），不能把两路已经是 
 
 - 下载跑在同一个 offscreen 文档里（`src/offscreen/dash-task.ts`），不进 service worker。解析器不打进后台包。没有新权限。offscreen 只拉取和拼接；进度写入和 `chrome.downloads` 与 HLS 一样交给 service worker。视频和音频两个文件都这样保存。
 - 进度、取消、并发 4、失败后再试 2 次，都走原来的 `downloadSegmentsInOrder`。
-- 任务记录形状和 HLS 相同，单独放在 `chrome.storage.session` 的 `dash-jobs`。offscreen 把记录发给 service worker 再写入。关掉 popup 再打开还能看到。同一时间只允许一个 HLS 或 DASH 下载。
+- 任务记录形状和 HLS 相同，单独放在 `chrome.storage.session` 的 `dash-jobs`。offscreen 把记录发给 service worker 再写入。关掉 popup 再打开还能看到。同一时间只允许一个 HLS、DASH 或 B 站下载。
 - 文件名用 `buildDownloadFilename`。直接把 `.mpd` 交给 `chrome.downloads` 会被拒绝，并提示用列表里的下载。
 
 ### 这一步故意不做
 
-- 不解密，不绕 DRM。这一步的 HLS / DASH 下载不伪造 Referer 或任何请求头。B 站分轨是第 11 节的例外。
+- v2 不解密。标准 AES-128 见第 11 节。SAMPLE-AES 和 DRM 仍然不做。HLS 和 DASH 不伪造 Referer 或任何请求头。B 站分轨是第 12 节的例外。
 - 不下载直播。
 - 不重新编码。mux.js 不认识的编码保留 `.ts`。
 - 不把分开的音视频合成一个文件。mux.js 合并不了两路 fMP4，手写 box 合并不可靠。
 - 不在 service worker 里跑分片循环或转封装。
 
-## 11. V3-2 B 站分轨
+## 11. V3-1 HLS 标准 AES-128
+
+V3-1 没有新权限。版本号在 V3-2 升到 0.2.1，见第 12 节。
+
+只解密点播清单里的 `METHOD=AES-128`。
+
+1. **解析**（`src/shared/hls.ts`）
+   - `KEYFORMAT` 缺省或 `identity` 才接受。密钥 `URI` 必须是 http 或 https，相对地址按清单解析，不把清单 query 里的 token 抄过去。
+   - 有 `IV` 就用那 16 字节（`0x` 开头的十六进制，左边补零）。没有就用该片的 media sequence，按大端放进 16 字节。`EXT-X-MEDIA-SEQUENCE` 缺省是 0，每片加 1。
+   - 新的 `EXT-X-KEY` 只影响它后面的分片。`METHOD=NONE` 之后的分片不再加密。
+   - `EXT-X-SESSION-KEY` 不拿来解密。它若是 AES-128 identity，忽略；若是 SAMPLE-AES 或 DRM，整份清单拒绝。
+2. **仍然拒绝，并给中文原因**
+   - `METHOD=SAMPLE-AES`（含 SAMPLE-AES-CTR）。
+   - `KEYFORMAT` 不是 identity。
+   - 起始清单里有 DRM 迹象：`com.apple.streamingkeydelivery`、`skd://`、Widevine URN `edef8ba9-79d6-4ace-a3c8-27dcd51d21ed`、PlayReady URN `9a04f079-9840-4286-ab92-e65be0885f95`，以及 `com.widevine`、`com.microsoft.playready`。
+   - 密钥不是 16 字节，或加密分片长度不是 16 的整数倍。
+   - 带 `EXT-X-MAP` 的 AES-128。解密后要走 TS 转封装，fMP4 初始化段这条路径不做。
+   - 直播和 `EXT-X-BYTERANGE` 跟以前一样拒绝。
+3. **取密钥和解密**（`src/shared/hls-aes.ts`，在 offscreen 页面里调用）
+   - 和分片一样用普通 `fetch`：不设置 `headers`，不伪造 Referer、Cookie 或 UA，不用 `declarativeNetRequest`。`credentials: 'include'` 只带浏览器里已经有的 Cookie。
+   - 401、403、404、网络失败或密钥长度不对，就停，中文说明是获取密钥失败。不去绕。
+   - 同一个密钥地址只请求一次。密钥中途换地址时再取新的。
+   - `crypto.subtle` 做 AES-CBC。浏览器会去掉 PKCS7 填充。不引入新的依赖。
+   - 明文第一个字节必须是 TS 同步字节 `0x47`，否则报「解密失败（密钥或 IV 不对）」。
+   - 密钥字节和明文不进 `chrome.storage`，不进日志，不显示在弹窗里。界面上只写「含 AES-128 加密」。
+4. **之后的路径**
+   - 明文分片交给现有的 TS→mp4 转封装。转失败或太大时，仍保存 `.ts`，保存的是解密后的 TS，不是密文。
+   - offscreen 页面仍然只用 `chrome.runtime`。进度和 `chrome.downloads` 交给 service worker。解密只用 `crypto.subtle` 和普通 `fetch`。
+
+## 12. V3-2 B 站分轨
 
 B 站网页播放器没有 `.mpd`。视频和音频是两个独立的 fMP4（`.m4s`），播放器用 Range 请求拉下来交给 MSE。`<video>` 上通常是 `blob:`，所以旧版弹窗里没有可下载项。CDN（`*.bilivideo.com` / `*.bilivideo.cn`）没有 Referer 会回 403。
 
@@ -384,6 +426,6 @@ B 站网页播放器没有 `.mpd`。视频和音频是两个独立的 fMP4（`.m
 1. 只用 `chrome.declarativeNetRequest.updateSessionRules`。这个 API 在 offscreen 页里不能用，只能由 service worker 调用。下载开始前先加规则，再通知 offscreen。成功、失败、取消、offscreen 不再跑这条任务，都会删规则。service worker 启动时清掉本扩展残留的规则。规则 id 固定在 910001–910032，只删除这个区间。
 2. 每条规则的 `requestDomains` 只有正在下载的那一个媒体主机（不填父域 `bilivideo.com`，因为 Chrome 还会匹配子域）。`tabIds` 只有 `-1`，也就是只匹配不从标签页发出的请求，不影响正常浏览。`resourceTypes` 只有 `xmlhttprequest`：offscreen 里的 `fetch()` 在 Chromium 里按 RequestDestination 为空的子资源处理，declarativeNetRequest 把它记成 `xmlhttprequest`，不是 `media`（那是 video/audio 元素自己拉的）。
 3. `action` 是 `modifyHeaders`，只设置一个请求头：Referer，`operation` 为 `set`。值是触发下载的标签页 URL 的 origin 再加 `/`，例如 `https://www.bilibili.com/`。只接受 http / https 页面。不改 Cookie、User-Agent、Origin 或任何其它头。
-4. 不处理登录权限，不绕过会员或付费限制，不处理 DRM，不碰 Widevine。401 / 403 直接用中文报错，不重试、不换地址。这套规则不用于 HLS、原有 DASH 和普通直链。
+4. 不处理登录权限，不绕过会员或付费限制，不处理 DRM，不碰 Widevine。401 / 403 直接用中文报错，不重试、不换地址。这套规则不用于 HLS（包括取 AES-128 密钥）、DASH 和普通直链。
 
 当前版本是 0.2.1，用来和 0.2.0 的构建区分。
