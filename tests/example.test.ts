@@ -16,6 +16,7 @@ describe('manifest', () => {
       'storage',
       'tabs',
       'clipboardWrite',
+      'offscreen',
     ])
     expect(manifest.host_permissions).toEqual(['<all_urls>'])
     expect(manifest.background).toMatchObject({

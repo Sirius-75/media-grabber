@@ -258,7 +258,7 @@ describe('DOWNLOAD', () => {
     const cases: Array<{ message: unknown; error: string }> = [
       {
         message: { type: MESSAGE_TYPE.DOWNLOAD, url: 'https://cdn.example/live/index.m3u8', tabId: 1 },
-        error: 'HLS 清单，仅支持复制链接',
+        error: 'HLS 清单不能当直链保存，请用列表里的下载',
       },
       {
         message: { type: MESSAGE_TYPE.DOWNLOAD, url: 'https://cdn.example/manifest.mpd', tabId: 1 },

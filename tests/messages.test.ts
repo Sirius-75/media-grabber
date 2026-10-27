@@ -5,6 +5,10 @@ import {
   isDownloadMessage,
   isExtensionMessage,
   isGetMediaMessage,
+  isHlsCancelMessage,
+  isHlsDownloadMessage,
+  isHlsInspectMessage,
+  isHlsSyncMessage,
   isMediaFoundMessage,
 } from '../src/shared/messages'
 
@@ -15,6 +19,10 @@ describe('消息常量', () => {
       GET_MEDIA: 'GET_MEDIA',
       CLEAR_MEDIA: 'CLEAR_MEDIA',
       DOWNLOAD: 'DOWNLOAD',
+      HLS_INSPECT: 'HLS_INSPECT',
+      HLS_DOWNLOAD: 'HLS_DOWNLOAD',
+      HLS_CANCEL: 'HLS_CANCEL',
+      HLS_SYNC: 'HLS_SYNC',
     })
   })
 })
@@ -175,14 +183,36 @@ describe('isDownloadMessage', () => {
   })
 })
 
+describe('HLS 消息', () => {
+  it('检查、下载、取消和同步都要带上该有的地址', () => {
+    expect(isHlsInspectMessage({ type: MESSAGE_TYPE.HLS_INSPECT, url: 'https://cdn.example/a.m3u8', tabId: 2 })).toBe(
+      true,
+    )
+    expect(isHlsInspectMessage({ type: MESSAGE_TYPE.HLS_INSPECT, url: '  ' })).toBe(false)
+    expect(
+      isHlsDownloadMessage({
+        type: MESSAGE_TYPE.HLS_DOWNLOAD,
+        url: 'https://cdn.example/a.m3u8',
+        mediaUrl: 'https://cdn.example/720.m3u8',
+      }),
+    ).toBe(true)
+    expect(isHlsDownloadMessage({ type: MESSAGE_TYPE.HLS_DOWNLOAD, url: 'https://cdn.example/a.m3u8' })).toBe(false)
+    expect(isHlsCancelMessage({ type: MESSAGE_TYPE.HLS_CANCEL, url: 'https://cdn.example/a.m3u8' })).toBe(true)
+    expect(isHlsSyncMessage({ type: MESSAGE_TYPE.HLS_SYNC })).toBe(true)
+    expect(isHlsSyncMessage({ type: MESSAGE_TYPE.HLS_CANCEL })).toBe(false)
+  })
+})
+
 describe('isExtensionMessage', () => {
-  it('四种消息都能通过，其它值不行', () => {
+  it('协议里的消息都能通过，其它值不行', () => {
     expect(isExtensionMessage({ type: MESSAGE_TYPE.MEDIA_FOUND, items: [] })).toBe(true)
     expect(isExtensionMessage({ type: MESSAGE_TYPE.GET_MEDIA, tabId: 1 })).toBe(true)
     expect(isExtensionMessage({ type: MESSAGE_TYPE.CLEAR_MEDIA, tabId: 1 })).toBe(true)
     expect(isExtensionMessage({ type: MESSAGE_TYPE.DOWNLOAD, url: 'https://cdn.example/a.mp4' })).toBe(
       true,
     )
+    expect(isExtensionMessage({ type: MESSAGE_TYPE.HLS_INSPECT, url: 'https://cdn.example/a.m3u8' })).toBe(true)
+    expect(isExtensionMessage({ type: MESSAGE_TYPE.HLS_SYNC })).toBe(true)
     expect(isExtensionMessage({ type: 'NOPE' })).toBe(false)
     expect(isExtensionMessage(undefined)).toBe(false)
   })

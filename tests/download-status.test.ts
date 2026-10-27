@@ -31,7 +31,7 @@ describe('downloadBlockReason', () => {
         url: 'https://cdn.example/live/index.m3u8',
         fromStore: false,
       }),
-    ).toBe('HLS 清单，仅支持复制链接')
+    ).toBe('HLS 清单不能当直链保存，请用列表里的下载')
     expect(
       downloadBlockReason({
         url: 'https://cdn.example/manifest.mpd',

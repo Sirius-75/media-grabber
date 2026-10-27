@@ -12,6 +12,7 @@ import {
   type DownloadStatusRecord,
 } from '../shared/download-status'
 import { formatBytes } from '../shared/format'
+import type { HlsJobMap, HlsJobPhase, HlsJobRecord } from '../shared/hls-job'
 import type { MediaItem, MediaKind } from '../shared/types'
 
 /** 单行里大约能放下的字符数。更长的地址用省略号截断，悬停仍看全文。 */
@@ -27,8 +28,11 @@ const KIND_LABEL: Record<MediaKind, string> = {
   dash: 'DASH',
 }
 
+const HLS_NOTE = 'HLS 清单，可下载未加密的点播'
+const OLD_HLS_NOTE = 'HLS 清单，仅支持复制链接'
+
 const KIND_FALLBACK_NOTE: Partial<Record<MediaKind, string>> = {
-  hls: 'HLS 清单，仅支持复制链接',
+  hls: HLS_NOTE,
   dash: 'DASH 清单，仅支持复制链接',
 }
 
@@ -57,8 +61,8 @@ function schemeOf(url: string): string {
 }
 
 /**
- * 直链才给出下载按钮。
- * HLS / DASH、blob / data，以及 downloadable 为 false 的条目都不显示。
+ * 直链才走 chrome.downloads 那个下载按钮。
+ * HLS 用另一颗按钮。DASH、blob、data，以及 downloadable 为 false 的条目都不显示这颗。
  */
 export function canOfferDownload(
   item: Pick<MediaItem, 'url' | 'kind' | 'downloadable'>,
@@ -70,10 +74,22 @@ export function canOfferDownload(
   return true
 }
 
+/** m3u8 的 http(s) 地址可以下载未加密点播。mpd 仍然只复制。 */
+export function canOfferHlsDownload(item: Pick<MediaItem, 'url' | 'kind'>): boolean {
+  if (item.kind !== 'hls') return false
+  const scheme = schemeOf(item.url)
+  return scheme === 'http' || scheme === 'https'
+}
+
 /** 不可下载时给一句说明。条目自带 note 时优先用它。 */
 export function itemNote(
   item: Pick<MediaItem, 'url' | 'kind' | 'downloadable' | 'note'>,
 ): string | undefined {
+  if (canOfferHlsDownload(item)) {
+    const note = item.note?.trim()
+    if (note && note !== OLD_HLS_NOTE) return note
+    return HLS_NOTE
+  }
   const note = item.note?.trim()
   if (note) return note
   if (canOfferDownload(item)) return undefined
@@ -150,9 +166,26 @@ export function statusForItem(
   return statuses[key]
 }
 
+/** 按规范化后的 URL 取 HLS 任务。 */
+export function hlsJobForItem(
+  item: Pick<MediaItem, 'url'>,
+  jobs: HlsJobMap | undefined,
+): HlsJobRecord | undefined {
+  if (!jobs) return undefined
+  const direct = jobs[item.url]
+  if (direct) return direct
+  const key = normalizeUrl(item.url)
+  if (!key) return undefined
+  return jobs[key]
+}
+
 export interface ListActions {
   onCopy: (url: string, button: HTMLButtonElement) => void
   onDownload: (url: string, button: HTMLButtonElement) => void
+  onHlsDownload?: (url: string, button: HTMLButtonElement) => void
+  onHlsStart?: (url: string, mediaUrl: string, button: HTMLButtonElement) => void
+  onHlsCancel?: (url: string, button: HTMLButtonElement) => void
+  onHlsVariant?: (url: string, mediaUrl: string) => void
 }
 
 /** 把当前列表画进 ul。调用方保留 ul 上的点击监听，这里只换子节点。 */
@@ -160,8 +193,12 @@ export function renderList(
   list: HTMLElement,
   items: readonly MediaItem[],
   statuses?: DownloadStatusMap,
+  jobs?: HlsJobMap,
+  preferredVariant?: ReadonlyMap<string, string>,
 ): void {
-  const rows = items.map((item, index) => renderItem(item, index, statusForItem(item, statuses)))
+  const rows = items.map((item, index) =>
+    renderItem(item, index, statusForItem(item, statuses), hlsJobForItem(item, jobs), preferredVariant?.get(item.url)),
+  )
   list.replaceChildren(...rows)
 }
 
@@ -185,6 +222,23 @@ export function bindListActions(
     if (!item) return
     if (button.dataset.action === 'copy') actions.onCopy(item.url, button)
     if (button.dataset.action === 'download') actions.onDownload(item.url, button)
+    if (button.dataset.action === 'hls-download') actions.onHlsDownload?.(item.url, button)
+    if (button.dataset.action === 'hls-cancel') actions.onHlsCancel?.(item.url, button)
+    if (button.dataset.action === 'hls-start') {
+      const select = row.querySelector('select')
+      const mediaUrl = select instanceof HTMLSelectElement ? select.value : ''
+      actions.onHlsStart?.(item.url, mediaUrl, button)
+    }
+  })
+  list.addEventListener('change', (event) => {
+    const select = event.target
+    if (!(select instanceof HTMLSelectElement) || !list.contains(select)) return
+    const row = select.closest('.item')
+    if (!(row instanceof HTMLElement)) return
+    const index = Number(row.dataset.index)
+    const item = getItems()[index]
+    if (!item || !select.value) return
+    actions.onHlsVariant?.(item.url, select.value)
   })
 }
 
@@ -203,10 +257,18 @@ export function flashButton(button: HTMLButtonElement, text: string, ms = BUTTON
   }, ms)
 }
 
+function hlsStatusPhase(phase: HlsJobPhase): DownloadPhase {
+  if (phase === 'complete') return 'complete'
+  if (phase === 'failed' || phase === 'cancelled') return 'failed'
+  return 'started'
+}
+
 function renderItem(
   item: MediaItem,
   index: number,
   status: DownloadStatusRecord | undefined,
+  hlsJob: HlsJobRecord | undefined,
+  preferredMediaUrl: string | undefined,
 ): HTMLLIElement {
   const row = document.createElement('li')
   row.className = 'item'
@@ -238,12 +300,38 @@ function renderItem(
 
   row.append(meta, url)
 
-  const note = itemNote(item)
-  if (note) {
-    const noteEl = document.createElement('p')
-    noteEl.className = 'note'
-    noteEl.textContent = note
-    row.append(noteEl)
+  const hls = canOfferHlsDownload(item) ? hlsJob : undefined
+  // 下载进行中时，进度和失败原因已经说明状态，不再重复清单说明。
+  if (!hls || hls.phase === 'picking') {
+    const note = itemNote(item)
+    if (note) {
+      const noteEl = document.createElement('p')
+      noteEl.className = 'note'
+      noteEl.textContent = note
+      row.append(noteEl)
+    }
+  }
+
+  if (hls?.warning && (hls.phase === 'downloading' || hls.phase === 'picking' || hls.phase === 'failed')) {
+    const warning = document.createElement('p')
+    warning.className = 'warning'
+    warning.textContent = hls.warning
+    row.append(warning)
+  }
+
+  if (hls && hls.phase === 'downloading') {
+    const progress = document.createElement('div')
+    progress.className = 'progress'
+    progress.setAttribute('role', 'progressbar')
+    progress.setAttribute('aria-valuemin', '0')
+    progress.setAttribute('aria-valuemax', String(hls.total))
+    progress.setAttribute('aria-valuenow', String(hls.completed))
+    const fill = document.createElement('div')
+    fill.className = 'progress-fill'
+    const ratio = hls.total > 0 ? Math.min(100, Math.round((hls.completed / hls.total) * 100)) : 0
+    fill.style.width = `${ratio}%`
+    progress.append(fill)
+    row.append(progress)
   }
 
   const actions = document.createElement('div')
@@ -265,8 +353,45 @@ function renderItem(
     actions.append(download)
   }
 
+  if (canOfferHlsDownload(item)) {
+    if (hls?.phase === 'picking' && hls.variants && hls.variants.length > 0) {
+      const select = document.createElement('select')
+      select.className = 'quality'
+      select.setAttribute('aria-label', '清晰度')
+      for (const variant of hls.variants) {
+        const option = document.createElement('option')
+        option.value = variant.url
+        option.textContent = variant.label
+        select.append(option)
+      }
+      const chosen = preferredMediaUrl && hls.variants.some((variant) => variant.url === preferredMediaUrl)
+        ? preferredMediaUrl
+        : hls.variants[0]?.url
+      if (chosen) select.value = chosen
+      const start = document.createElement('button')
+      start.type = 'button'
+      start.dataset.action = 'hls-start'
+      start.textContent = '开始下载'
+      actions.append(select, start)
+    } else if (hls?.phase === 'downloading' || hls?.phase === 'inspecting') {
+      const cancel = document.createElement('button')
+      cancel.type = 'button'
+      cancel.dataset.action = 'hls-cancel'
+      cancel.textContent = '取消'
+      actions.append(cancel)
+    } else {
+      const download = document.createElement('button')
+      download.type = 'button'
+      download.className = 'hls-download'
+      download.dataset.action = 'hls-download'
+      download.textContent = '下载'
+      actions.append(download)
+    }
+  }
+
   row.append(actions)
-  if (status) setRowStatus(row, status)
+  if (hls) setRowStatus(row, { phase: hlsStatusPhase(hls.phase), message: hls.message })
+  else if (status) setRowStatus(row, status)
   return row
 }
 
