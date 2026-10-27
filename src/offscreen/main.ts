@@ -3,13 +3,16 @@
  *
  * Service worker 会被回收，分片下载和拼接不能放在那里。
  * 这里按清单顺序把分片拉进内存，拼成一个 Blob，再交给 chrome.downloads。
- * 不设置请求头，也不伪造 Referer。
+ * MPEG-TS 在保存前转封装成 mp4。转失败就仍保存原来的 .ts。
+ * 带 EXT-X-MAP 的 fMP4 不再转一次。不设置请求头，也不伪造 Referer。
  */
 
 import { describeInterruptReason } from '../shared/download-status'
 import { buildDownloadFilename } from '../shared/filename'
 import { downloadSegmentsInOrder } from '../shared/hls-download'
 import { fetchPlaylistText, fetchSegmentBytes } from '../shared/hls-fetch'
+import { planHlsSave, type HlsSavePlan } from '../shared/hls-remux'
+import { transmuxTsSegment } from '../shared/hls-remux-mux'
 import {
   HLS_TEXT,
   describePlaylistStatus,
@@ -299,16 +302,62 @@ async function runDownload(request: DownloadRequest, controller: AbortController
       return
     }
 
+    let planned: HlsSavePlan
+    try {
+      planned = await planHlsSave({
+        container: media.container,
+        parts: result.parts,
+        transmux: transmuxTsSegment,
+        signal,
+        // 每片转完让出一次事件循环，取消才能插进来。转封装本身仍在这个页面里，不进 service worker。
+        yield: () =>
+          new Promise((resolve) => {
+            setTimeout(resolve, 0)
+          }),
+        onRemuxStart: () =>
+          writeJob(
+            key,
+            job({
+              phase: 'remuxing',
+              message: HLS_TEXT.remuxing,
+              completed: total,
+              total,
+              warning: assessment.warning,
+            }),
+            controller,
+          ),
+      })
+    } catch (error) {
+      // fMP4 不走转封装。TS 转封装出了预料之外的错，也要留下 .ts，不能让整次下载失败。
+      if (media.container !== 'ts') throw error
+      if (!stillCurrent(controller)) return
+      if (signal.aborted) {
+        await writeJob(key, job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: total, total }), controller)
+        return
+      }
+      warn('转封装失败，改为保存 TS', error)
+      planned = {
+        ok: true,
+        ext: 'ts',
+        mime: 'video/mp2t',
+        parts: result.parts,
+        message: HLS_TEXT.remuxFallback,
+      }
+    }
+    if (!stillCurrent(controller)) return
+    if (!planned.ok) {
+      await writeJob(key, job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: total, total }), controller)
+      return
+    }
+
     const filename = buildDownloadFilename({
       title: request.title,
       url: key,
-      ext: media.container,
+      ext: planned.ext,
       index: request.index,
     })
     // 分片已经是独立的 Uint8Array。这里只做一次类型断言，不再复制一份，避免峰值内存再翻一倍。
-    const blob = new Blob(result.parts as BlobPart[], {
-      type: media.container === 'mp4' ? 'video/mp4' : 'video/mp2t',
-    })
+    const blob = new Blob(planned.parts as BlobPart[], { type: planned.mime })
     objectUrl = URL.createObjectURL(blob)
     // 只传 url / filename / saveAs / conflictAction，不加 headers。
     const downloadId = await chrome.downloads.download({
@@ -327,7 +376,7 @@ async function runDownload(request: DownloadRequest, controller: AbortController
       key,
       job({
         phase: 'complete',
-        message: HLS_TEXT.complete,
+        message: planned.message,
         completed: total,
         total,
         warning: assessment.warning,
@@ -358,7 +407,7 @@ async function syncJobs(): Promise<{ ok: true }> {
     const map = await readMap()
     let changed = false
     for (const [key, record] of Object.entries(map)) {
-      if (record.phase !== 'downloading' && record.phase !== 'inspecting') continue
+      if (record.phase !== 'downloading' && record.phase !== 'inspecting' && record.phase !== 'remuxing') continue
       if (active?.key === key) continue
       map[key] = {
         ...record,
@@ -383,7 +432,14 @@ function cancelJob(playlistUrl: string): { ok: true } {
     const map = await readMap()
     const record = map[playlistUrl]
     if (!record) return
-    if (record.phase !== 'downloading' && record.phase !== 'inspecting' && record.phase !== 'picking') return
+    if (
+      record.phase !== 'downloading' &&
+      record.phase !== 'inspecting' &&
+      record.phase !== 'picking' &&
+      record.phase !== 'remuxing'
+    ) {
+      return
+    }
     map[playlistUrl] = {
       ...record,
       phase: 'cancelled',

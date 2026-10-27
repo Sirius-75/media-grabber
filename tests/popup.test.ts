@@ -351,6 +351,34 @@ describe('HLS 下载界面', () => {
     expect(list.querySelector('[data-action="hls-download"]')).toBeNull()
     list.querySelector<HTMLButtonElement>('[data-action="hls-cancel"]')?.click()
     expect(cancels).toEqual([hls.url])
+
+    renderList(list, [hls], undefined, {
+      [hls.url]: {
+        phase: 'remuxing',
+        message: '正在转成 mp4…',
+        completed: 10,
+        total: 10,
+        warning: '拼接时会占用较多内存',
+        updatedAt: 4,
+      },
+    })
+    expect(list.querySelector('.status')?.textContent).toBe('正在转成 mp4…')
+    expect(list.querySelector('.status')?.className).toContain('status-started')
+    expect(list.querySelector('.progress')).toBeNull()
+    expect(list.querySelector('.warning')?.textContent).toContain('内存')
+    expect(list.querySelector('[data-action="hls-cancel"]')).toBeTruthy()
+
+    renderList(list, [hls], undefined, {
+      [hls.url]: {
+        phase: 'complete',
+        message: '转封装失败，已保存为 .ts，可用 VLC 播放',
+        completed: 10,
+        total: 10,
+        updatedAt: 5,
+      },
+    })
+    expect(list.querySelector('.status')?.textContent).toBe('转封装失败，已保存为 .ts，可用 VLC 播放')
+    expect(list.querySelector('.status')?.className).toContain('status-complete')
     expect(hlsJobForItem(hls, { [hls.url]: { phase: 'failed', message: '服务器拒绝访问（403）', completed: 0, total: 1, updatedAt: 3 } })?.message).toBe(
       '服务器拒绝访问（403）',
     )

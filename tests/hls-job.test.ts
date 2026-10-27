@@ -8,10 +8,12 @@ describe('HLS 任务记录', () => {
       readHlsJobMap({
         '': { phase: 'failed', message: 'x', completed: 0, total: 0, updatedAt: 1 },
         good: { phase: 'downloading', message: '已下载 1/4', completed: 1, total: 4, updatedAt: 2 },
+        remux: { phase: 'remuxing', message: '正在转成 mp4…', completed: 4, total: 4, updatedAt: 4 },
         bad: { phase: 'nope', message: 'x', completed: 0, total: 0, updatedAt: 3 },
       }),
     ).toEqual({
       good: { phase: 'downloading', message: '已下载 1/4', completed: 1, total: 4, updatedAt: 2 },
+      remux: { phase: 'remuxing', message: '正在转成 mp4…', completed: 4, total: 4, updatedAt: 4 },
     })
   })
 
