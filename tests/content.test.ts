@@ -247,7 +247,7 @@ describe('Content Script DOM 扫描', () => {
           kind: 'hls',
           ext: 'm3u8',
           downloadable: false,
-          note: 'HLS 清单，可下载未加密的点播',
+          note: 'HLS 清单，可下载未加密或 AES-128 点播',
         }),
         draft({
           url: 'https://cdn.example/stream?id=1',

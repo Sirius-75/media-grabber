@@ -10,7 +10,7 @@ const direct = {
     kind: 'hls',
     ext: 'm3u8',
     downloadable: false,
-    note: 'HLS 清单，可下载未加密的点播',
+    note: 'HLS 清单，可下载未加密或 AES-128 点播',
   },
   mpd: {
     kind: 'dash',
