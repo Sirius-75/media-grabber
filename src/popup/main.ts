@@ -250,7 +250,8 @@ function liveDownloadRow(url: string, button: HTMLButtonElement): HTMLElement | 
   if (!(listEl instanceof HTMLElement)) return undefined
   const key = statusKey(url)
   const index = items.findIndex((item) => item.url === url || statusKey(item.url) === key)
-  const row = listEl.querySelectorAll('.item')[index]
+  if (index < 0) return undefined
+  const row = listEl.querySelector(`.item[data-index="${index}"]`)
   return row instanceof HTMLElement ? row : undefined
 }
 
@@ -443,14 +444,18 @@ function rememberBilibili(url: string, record: Omit<HlsJobRecord, 'updatedAt'>):
   }
 }
 
-async function requestBilibiliDownload(url: string, withAudio: boolean): Promise<void> {
+async function requestBilibiliDownload(
+  url: string,
+  mode: 'with-audio' | 'audio-only' | 'video-only',
+): Promise<void> {
   rememberBilibili(url, { phase: 'downloading', message: BILIBILI_TEXT.preparing, completed: 0, total: 0 })
   paint()
-  const message: BilibiliDownloadMessage = {
-    type: MESSAGE_TYPE.BILIBILI_DOWNLOAD,
-    url,
-    withAudio,
-    separate: wantsSeparate(),
+  const message: BilibiliDownloadMessage = { type: MESSAGE_TYPE.BILIBILI_DOWNLOAD, url }
+  if (mode === 'with-audio') {
+    message.withAudio = true
+    message.separate = wantsSeparate()
+  } else if (mode === 'audio-only') {
+    message.audioOnly = true
   }
   if (tabId !== undefined) message.tabId = tabId
   try {
@@ -620,10 +625,13 @@ function start(): void {
       preferredVariant.set(url, representationId)
     },
     onBilibiliDownload(url) {
-      void requestBilibiliDownload(url, false)
+      void requestBilibiliDownload(url, 'video-only')
     },
     onBilibiliWithAudio(url) {
-      void requestBilibiliDownload(url, true)
+      void requestBilibiliDownload(url, 'with-audio')
+    },
+    onBilibiliAudio(url) {
+      void requestBilibiliDownload(url, 'audio-only')
     },
     onBilibiliCancel(url) {
       void cancelBilibiliDownload(url)

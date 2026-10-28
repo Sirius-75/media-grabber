@@ -24,7 +24,7 @@ export const BILIBILI_M4S_LABEL = 'B站 m4s 分轨文件'
 
 /** 页面 playinfo 里的视频或音频。 */
 export const BILIBILI_NOTE =
-  '只下载页面当前能播放的内容，不支持会员专享。视频和音频默认合并成一个 mp4，也可以勾选「分开保存视频和音频」。链接有有效期，失效后请先刷新页面再下载。'
+  '只下载页面当前能播放的内容，不支持会员专享。「下载视频」默认合并成一个 mp4，也可以勾选「分开保存视频和音频」。视频行的「下载音频」保存码率最高的音轨，音频行保存这一条。链接有有效期，失效后请先刷新页面再下载。'
 
 /** 老式 durl 的单个 mp4。 */
 export const BILIBILI_FILE_NOTE =
@@ -41,6 +41,7 @@ export const BILIBILI_TEXT = {
   tooManyRules: '需要的 Referer 规则超过了预留数量',
   refererFailed: '无法设置下载所需的 Referer，下载没有开始',
   noAudio: '没有可一起下载的音频',
+  noAudioTrack: '没有找到可下载的音频',
   partial: '服务器只返回了部分内容，无法保存完整文件',
   missing: '找不到媒体文件（404）',
   uncertain: '未能判断音视频类型，已保存为 .mp4',
@@ -511,9 +512,19 @@ export function planBilibiliFiles(
   items: readonly Pick<MediaItem, 'url' | 'bilibili'>[],
   primaryUrl: string,
   withAudio: boolean,
+  audioOnly = false,
 ): { ok: true; files: BilibiliDownloadFile[] } | { ok: false; error: string } {
   const url = normalizeUrl(primaryUrl) || primaryUrl.trim()
   if (!httpUrl(url)) return { ok: false, error: BILIBILI_TEXT.badMedia }
+  if (audioOnly) {
+    const primary = items.find((item) => item.url === url)
+    if (primary?.bilibili?.role === 'audio') {
+      return { ok: true, files: [{ url, role: 'audio' }] }
+    }
+    const audioUrl = highestBilibiliAudioUrl(items)
+    if (!audioUrl) return { ok: false, error: BILIBILI_TEXT.noAudioTrack }
+    return { ok: true, files: [{ url: audioUrl, role: 'audio' }] }
+  }
   const primary = items.find((item) => item.url === url)
   const role = primary?.bilibili?.role ?? 'unknown'
   const files: BilibiliDownloadFile[] = [{ url, role }]

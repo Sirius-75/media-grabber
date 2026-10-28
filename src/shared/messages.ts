@@ -124,13 +124,19 @@ export interface DashSyncMessage {
   type: typeof MESSAGE_TYPE.DASH_SYNC
 }
 
-/** popup → background。下载一条 B 站分轨；withAudio 时再带上带宽最高的音频。 */
+/**
+ * popup → background。下载一条 B 站分轨。
+ * withAudio 再带上带宽最高的音频，并按 separate 决定是否合并。
+ * audioOnly 只下音频，不带视频。点在音频行上时下这一条，否则下带宽最高的。
+ */
 export interface BilibiliDownloadMessage {
   type: typeof MESSAGE_TYPE.BILIBILI_DOWNLOAD
   url: string
   tabId?: number
   withAudio?: boolean
-  /** 勾选「分开保存视频和音频」时为 true。缺省表示合并。 */
+  /** 只下载音频，不带视频。点在音频行上时下这一条，否则下带宽最高的。为 true 时忽略 withAudio。 */
+  audioOnly?: boolean
+  /** 勾选「分开保存视频和音频」时为 true。只对 withAudio 有意义。缺省表示合并。 */
   separate?: boolean
 }
 
@@ -277,6 +283,7 @@ export function isBilibiliDownloadMessage(value: unknown): value is BilibiliDown
   if (!isHttpishUrl(value.url)) return false
   if (value.tabId !== undefined && !isTabId(value.tabId)) return false
   if (value.withAudio !== undefined && typeof value.withAudio !== 'boolean') return false
+  if (value.audioOnly !== undefined && typeof value.audioOnly !== 'boolean') return false
   if (value.separate !== undefined && typeof value.separate !== 'boolean') return false
   return true
 }

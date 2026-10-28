@@ -90,17 +90,48 @@ export function canOfferDashDownload(item: Pick<MediaItem, 'url' | 'kind'>): boo
   return scheme === 'http' || scheme === 'https'
 }
 
-/** B 站分轨不走普通直链，单独一颗按钮。 */
+/** B 站分轨不走普通直链，用自己的按钮。 */
 export function canOfferBilibiliDownload(item: Pick<MediaItem, 'url' | 'bilibili'>): boolean {
   if (!item.bilibili?.label) return false
   const scheme = schemeOf(item.url)
   return scheme === 'http' || scheme === 'https'
 }
 
-function bilibiliButtonText(role: BilibiliRole): string {
-  if (role === 'audio') return '下载音频'
-  if (role === 'unknown') return '下载'
-  return '下载视频'
+/** 页面上没有可配对的音频时，写在视频条目说明里。 */
+export const BILIBILI_NO_AUDIO_HINT = '没找到音频，下载的视频没有声音'
+
+type PopupDownloadItem = Pick<MediaItem, 'url' | 'kind' | 'downloadable' | 'bilibili'>
+
+/**
+ * 有没有下载按钮。只看地址和类型，不看下载进行到哪一步。
+ * 直链、HLS、DASH、B 站分轨都算有。blob、data，以及 downloadable 为 false 且没有上述按钮的不算。
+ */
+export function hasPopupDownloadButton(item: PopupDownloadItem): boolean {
+  return (
+    canOfferDownload(item) ||
+    canOfferHlsDownload(item) ||
+    canOfferDashDownload(item) ||
+    canOfferBilibiliDownload(item)
+  )
+}
+
+function orderForPopup<T extends PopupDownloadItem>(
+  items: readonly T[],
+): Array<{ item: T; index: number }> {
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => {
+      const rank = Number(!hasPopupDownloadButton(left.item)) - Number(!hasPopupDownloadButton(right.item))
+      return rank || left.index - right.index
+    })
+}
+
+/**
+ * 能下载的在前，不能下载的在后。每一组保持原来的先后。
+ * 不改传入的数组，也不看下载状态。
+ */
+export function sortItemsForPopup<T extends PopupDownloadItem>(items: readonly T[]): T[] {
+  return orderForPopup(items).map((entry) => entry.item)
 }
 
 /** 不可下载时给一句说明。条目自带 note 时优先用它。 */
@@ -219,6 +250,7 @@ export interface ListActions {
   onDashVariant?: (url: string, mediaUrl: string) => void
   onBilibiliDownload?: (url: string, button: HTMLButtonElement) => void
   onBilibiliWithAudio?: (url: string, button: HTMLButtonElement) => void
+  onBilibiliAudio?: (url: string, button: HTMLButtonElement) => void
   onBilibiliCancel?: (url: string, button: HTMLButtonElement) => void
 }
 
@@ -233,7 +265,8 @@ export function renderList(
   bilibiliJobs?: HlsJobMap,
 ): void {
   const pairAudio = items.some((item) => item.bilibili?.role === 'audio')
-  const rows = items.map((item, index) =>
+  const ordered = orderForPopup(items)
+  const rows = ordered.map(({ item, index }) =>
     renderItem(
       item,
       index,
@@ -284,6 +317,7 @@ export function bindListActions(
     }
     if (button.dataset.action === 'bilibili-download') actions.onBilibiliDownload?.(item.url, button)
     if (button.dataset.action === 'bilibili-with-audio') actions.onBilibiliWithAudio?.(item.url, button)
+    if (button.dataset.action === 'bilibili-audio') actions.onBilibiliAudio?.(item.url, button)
     if (button.dataset.action === 'bilibili-cancel') actions.onBilibiliCancel?.(item.url, button)
   })
   list.addEventListener('change', (event) => {
@@ -369,7 +403,7 @@ function renderItem(
   const hls = segment?.job ?? (canOfferBilibiliDownload(item) ? bilibiliJob : undefined)
   // 下载进行中时，进度和失败原因已经说明状态，不再重复清单说明。
   if (!hls || hls.phase === 'picking') {
-    const note = itemNote(item)
+    const note = rowNote(item, pairAudio)
     if (note) {
       const noteEl = document.createElement('p')
       noteEl.className = 'note'
@@ -478,19 +512,7 @@ function renderItem(
       cancel.textContent = '取消'
       actions.append(cancel)
     } else {
-      const download = document.createElement('button')
-      download.type = 'button'
-      download.className = 'bilibili-download'
-      download.dataset.action = 'bilibili-download'
-      download.textContent = bilibiliButtonText(item.bilibili.role)
-      actions.append(download)
-      if (pairAudio && (item.bilibili.role === 'video' || item.bilibili.role === 'file')) {
-        const both = document.createElement('button')
-        both.type = 'button'
-        both.dataset.action = 'bilibili-with-audio'
-        both.textContent = '下载视频+音频'
-        actions.append(both)
-      }
+      appendBilibiliButtons(actions, item.bilibili.role, pairAudio)
     }
   }
 
@@ -498,6 +520,47 @@ function renderItem(
   if (hls) setRowStatus(row, { phase: hlsStatusPhase(hls.phase), message: hls.message })
   else if (status) setRowStatus(row, status)
   return row
+}
+
+/** 视频行在没有可配对音频时，说明里补上没有声音。其它条目用原来的说明。 */
+function rowNote(item: MediaItem, pairAudio: boolean): string | undefined {
+  const note = itemNote(item)
+  if (item.bilibili?.role !== 'video' || pairAudio || !canOfferBilibiliDownload(item)) return note
+  if (note?.includes(BILIBILI_NO_AUDIO_HINT)) return note
+  return note ? `${note} ${BILIBILI_NO_AUDIO_HINT}` : BILIBILI_NO_AUDIO_HINT
+}
+
+function bilibiliActionButton(action: string, text: string): HTMLButtonElement {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.dataset.action = action
+  button.textContent = text
+  return button
+}
+
+/**
+ * 视频（和老式整段 mp4）在页面上有音频时：「下载视频」带声音，「下载音频」只下音频。
+ * 没有可配对音频时，视频只留「下载视频」，点下去只下这一路。
+ * 音频行只有「下载音频」。嗅探到的未知分轨仍是一颗「下载」。
+ */
+function appendBilibiliButtons(actions: HTMLElement, role: BilibiliRole, pairAudio: boolean): void {
+  if (role === 'audio') {
+    actions.append(bilibiliActionButton('bilibili-audio', '下载音频'))
+    return
+  }
+  if (role === 'unknown') {
+    actions.append(bilibiliActionButton('bilibili-download', '下载'))
+    return
+  }
+  if (pairAudio) {
+    const video = bilibiliActionButton('bilibili-with-audio', '下载视频')
+    video.className = 'bilibili-download'
+    actions.append(video, bilibiliActionButton('bilibili-audio', '下载音频'))
+    return
+  }
+  const video = bilibiliActionButton('bilibili-download', '下载视频')
+  video.className = 'bilibili-download'
+  actions.append(video)
 }
 
 /** 在这一行上写下最近的下载状态。重复调用只改这一段，不重建按钮。 */

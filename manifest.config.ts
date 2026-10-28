@@ -8,13 +8,13 @@ import { defineManifest } from '@crxjs/vite-plugin'
  * name、description、version 是扩展卡片上给用户看的。
  * name 用 Media Grabber，和弹窗标题一致。
  * description 用中文说明用途，并写明仅供个人自用，长度留在 Chrome 的 132 字以内。
- * version 用 0.2.2，和 package.json 相同。打包时会再核对一次。
+ * version 用 0.2.3，和 package.json 相同。打包时会再核对一次。
  * declarativeNetRequestWithHostAccess 只给 B 站分轨下载补 Referer，见 PLAN.md 第 4 节。
  */
 export default defineManifest({
   manifest_version: 3,
   name: 'Media Grabber',
-  version: '0.2.2',
+  version: '0.2.3',
   description: '识别当前页面里的音视频资源，供复制或下载。仅供个人自用。',
   icons: {
     16: 'icons/icon16.png',
