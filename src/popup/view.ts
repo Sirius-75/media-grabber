@@ -115,20 +115,35 @@ export function hasPopupDownloadButton(item: PopupDownloadItem): boolean {
   )
 }
 
+/**
+ * 显示顺序分三档，数字越小越靠前。只看条目本身，不看下载进度。
+ * 0：已识别的 B 站视频 / 音频 / 整段（下载视频、下载音频），普通直链，以及能下载的 HLS、DASH。
+ * 1：类型未知的 B 站 m4s（只有一颗「下载」），以及其它只有单个下载按钮的次要条目。
+ * 2：没有下载按钮，只能复制链接。
+ */
+function popupRank(item: PopupDownloadItem): number {
+  if (!hasPopupDownloadButton(item)) return 2
+  if (item.bilibili?.role === 'unknown') return 1
+  if (item.bilibili) return 0
+  if (canOfferDownload(item) || canOfferHlsDownload(item) || canOfferDashDownload(item)) return 0
+  return 1
+}
+
 function orderForPopup<T extends PopupDownloadItem>(
   items: readonly T[],
 ): Array<{ item: T; index: number }> {
   return items
     .map((item, index) => ({ item, index }))
     .sort((left, right) => {
-      const rank = Number(!hasPopupDownloadButton(left.item)) - Number(!hasPopupDownloadButton(right.item))
+      const rank = popupRank(left.item) - popupRank(right.item)
       return rank || left.index - right.index
     })
 }
 
 /**
- * 能下载的在前，不能下载的在后。每一组保持原来的先后。
- * 不改传入的数组，也不看下载状态。
+ * 第 1 档在前，其次是只有一颗「下载」的次要条目，没有下载按钮的在最后。
+ * 同一档保持原来的先后。不改传入的数组，也不看下载状态。
+ * data-index 仍是原来的下标，方便按存储顺序找回这一行。
  */
 export function sortItemsForPopup<T extends PopupDownloadItem>(items: readonly T[]): T[] {
   return orderForPopup(items).map((entry) => entry.item)

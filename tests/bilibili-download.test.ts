@@ -8,7 +8,7 @@ import { BILIBILI_TEXT } from '../src/shared/bilibili'
 import { decideSaveExt, fetchBilibiliFile, handlerKind } from '../src/shared/bilibili-file'
 import { FMP4_MERGE_TEXT } from '../src/shared/fmp4-merge'
 import { HLS_TEXT } from '../src/shared/hls'
-import { runBilibiliDownload } from '../src/offscreen/bilibili-task'
+import { bilibiliProgressText, runBilibiliDownload } from '../src/offscreen/bilibili-task'
 import { buildFmp4 } from './fmp4-fixture'
 
 function fourcc(text: string): Uint8Array {
@@ -127,6 +127,17 @@ describe('拉取单个文件（示例数据）', () => {
     if (!result.ok) return
     expect(result.file.ext).toBe('m4a')
     expect(result.file.bytes).toEqual(bytes)
+  })
+})
+
+describe('弹窗进度文字（示例数据）', () => {
+  it('保持「正在下载文件 X / Y」，有速度时附在后面', () => {
+    expect(bilibiliProgressText('unknown', 1024 * 1024, 2 * 1024 * 1024)).toBe('正在下载文件 1 MB / 2 MB')
+    expect(bilibiliProgressText('unknown', 1024 * 1024, 2 * 1024 * 1024, '1.5 MB/s')).toBe(
+      '正在下载文件 1 MB / 2 MB（1.5 MB/s）',
+    )
+    expect(bilibiliProgressText('video', 512, undefined)).toBe('正在下载视频 512 B')
+    expect(bilibiliProgressText('audio', 2048, 4096)).toBe('正在下载音频 2 KB / 4 KB')
   })
 })
 

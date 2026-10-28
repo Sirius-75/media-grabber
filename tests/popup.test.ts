@@ -596,6 +596,122 @@ describe('列表排序', () => {
     list.querySelector<HTMLButtonElement>('[data-action="download"]')?.click()
     expect(downloads).toEqual([first.url])
   })
+
+  it('未知 m4s 排在已识别视频后面，同档保持原顺序，下载中不跳位', () => {
+    const unknownFirst = item({
+      url: 'https://cdn.example.test/example-data/unknown-1.m4s',
+      kind: 'video',
+      ext: 'm4s',
+      downloadable: false,
+      bilibili: { role: 'unknown', label: 'B站 m4s 分轨文件' },
+    })
+    const direct = item({ url: 'https://cdn.example/c.mp4', kind: 'video', ext: 'mp4' })
+    const video = item({
+      url: 'https://cdn.example.test/example-data/v.m4s',
+      kind: 'video',
+      ext: 'm4s',
+      downloadable: false,
+      bilibili: { role: 'video', label: 'B站视频 高清 1080P' },
+    })
+    const blocked = item({
+      url: 'https://cdn.example/locked.mp4',
+      kind: 'video',
+      downloadable: false,
+    })
+    const unknownSecond = item({
+      url: 'https://cdn.example.test/example-data/unknown-2.m4s',
+      kind: 'video',
+      ext: 'm4s',
+      downloadable: false,
+      bilibili: { role: 'unknown', label: 'B站 m4s 分轨文件' },
+    })
+    const audio = item({
+      url: 'https://cdn.example.test/example-data/a.m4s',
+      kind: 'audio',
+      ext: 'm4s',
+      downloadable: false,
+      bilibili: { role: 'audio', label: 'B站音频 192kbps' },
+    })
+    const whole = item({
+      url: 'https://cdn.example.test/example-data/old.mp4',
+      kind: 'video',
+      ext: 'mp4',
+      downloadable: false,
+      bilibili: { role: 'file', label: 'B站视频' },
+    })
+    expect(sortItemsForPopup([unknownFirst, whole]).map((entry) => entry.url)).toEqual([
+      whole.url,
+      unknownFirst.url,
+    ])
+
+    const source = [unknownFirst, direct, video, blocked, unknownSecond, audio]
+    const sorted = sortItemsForPopup(source)
+    expect(sorted.map((entry) => entry.url)).toEqual([
+      direct.url,
+      video.url,
+      audio.url,
+      unknownFirst.url,
+      unknownSecond.url,
+      blocked.url,
+    ])
+    expect(source.map((entry) => entry.url)).toEqual([
+      unknownFirst.url,
+      direct.url,
+      video.url,
+      blocked.url,
+      unknownSecond.url,
+      audio.url,
+    ])
+
+    const list = document.createElement('ul')
+    const titles = () => [...list.querySelectorAll('.url')].map((node) => node.getAttribute('title'))
+    renderList(list, source)
+    expect(titles()).toEqual(sorted.map((entry) => entry.url))
+    expect(list.querySelector('.item')?.getAttribute('data-index')).toBe('1')
+    const labels = [...list.querySelectorAll('.item')].map((row) =>
+      [...row.querySelectorAll('button')].map((button) => button.textContent),
+    )
+    expect(labels[0]).toEqual(['复制', '下载'])
+    expect(labels[1]).toEqual(['复制', '下载视频', '下载音频'])
+    expect(labels[2]).toEqual(['复制', '下载音频'])
+    expect(labels[3]).toEqual(['复制', '下载'])
+
+    renderList(list, source, undefined, undefined, undefined, undefined, {
+      [unknownFirst.url]: {
+        phase: 'downloading',
+        message: '正在下载文件 1 MB / 8 MB',
+        completed: 1,
+        total: 8,
+        updatedAt: 1,
+      },
+      [video.url]: {
+        phase: 'downloading',
+        message: '正在下载视频 2 MB / 8 MB',
+        completed: 2,
+        total: 8,
+        updatedAt: 2,
+      },
+    })
+    expect(titles()).toEqual(sorted.map((entry) => entry.url))
+    const videoRow = list.querySelectorAll('.item')[1]
+    const unknownRow = list.querySelectorAll('.item')[3]
+    expect(videoRow?.getAttribute('data-index')).toBe('2')
+    expect(unknownRow?.getAttribute('data-index')).toBe('0')
+    expect(videoRow?.querySelector('[data-action="bilibili-cancel"]')).toBeTruthy()
+    expect(unknownRow?.querySelector('[data-action="bilibili-cancel"]')).toBeTruthy()
+
+    const cancels: string[] = []
+    bindListActions(list, () => source, {
+      onCopy: () => undefined,
+      onDownload: () => undefined,
+      onBilibiliCancel(url) {
+        cancels.push(url)
+      },
+    })
+    videoRow?.querySelector<HTMLButtonElement>('[data-action="bilibili-cancel"]')?.click()
+    unknownRow?.querySelector<HTMLButtonElement>('[data-action="bilibili-cancel"]')?.click()
+    expect(cancels).toEqual([video.url, unknownFirst.url])
+  })
 })
 
 describe('B 站分轨按钮（示例数据）', () => {

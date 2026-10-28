@@ -16,6 +16,9 @@
  *
  * requestDomains 只放媒体 URL 的主机名本身。Chrome 还会匹配这个主机的子域，
  * 所以不能填 bilivideo.com 这种父域，否则会波及其它 CDN 主机。
+ *
+ * 规则按主机匹配，不按某一次 URL。大文件的多条 Range 请求打到同一主机时，
+ * 都会命中这一条已经加上的规则，不需要为并发再加规则或权限。
  */
 
 import { BILIBILI_TEXT } from './bilibili'
