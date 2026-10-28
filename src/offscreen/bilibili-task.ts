@@ -1,7 +1,8 @@
 /**
  * 在后台下载页里保存 B 站的视频和音频。
  * 两路都下到时默认合并成一个 mp4。合并失败、超过 1GB，或用户选择分开时，仍各存一个文件。
- * fetch 不设置请求头。进度和保存文件都交给调用方，这里不碰扩展 API。
+ * fetch 只在大文件分段时带 Range，其它请求头不在这里设置。
+ * 进度和保存文件都交给调用方，这里不碰扩展 API。
  */
 
 import {
@@ -12,7 +13,7 @@ import { fetchBilibiliFile, type BilibiliFetchResult } from '../shared/bilibili-
 import { DASH_TEXT } from '../shared/dash-text'
 import { FMP4_MERGE_TEXT } from '../shared/fmp4-merge'
 import { buildDownloadFilename } from '../shared/filename'
-import { formatBytes } from '../shared/format'
+import { formatBytes, slidingMegabyteRate } from '../shared/format'
 import { HLS_TEXT } from '../shared/hls'
 import type { FetchLike } from '../shared/hls-fetch'
 import type { HlsJobRecord } from '../shared/hls-job'
@@ -71,10 +72,20 @@ function roleText(role: BilibiliRole): string {
   return '视频'
 }
 
-function progressText(role: BilibiliRole, received: number, total: number | undefined): string {
+/** 弹窗上的进度。速度是最近几秒的滑动平均，样本不够时只显示已有的字节。 */
+export function bilibiliProgressText(
+  role: BilibiliRole,
+  received: number,
+  total: number | undefined,
+  speed?: string,
+): string {
   const name = roleText(role)
-  if (total !== undefined && total > 0) return `正在下载${name} ${formatBytes(received)} / ${formatBytes(total)}`
-  return `正在下载${name} ${formatBytes(received)}`
+  const base =
+    total !== undefined && total > 0
+      ? `正在下载${name} ${formatBytes(received)} / ${formatBytes(total)}`
+      : `正在下载${name} ${formatBytes(received)}`
+  if (!speed) return base
+  return `${base}（${speed}）`
 }
 
 function spanOf(index: number, count: number): { start: number; end: number } {
@@ -148,11 +159,13 @@ export async function runBilibiliDownload(
       if (!host.still(controller)) return { ok: false, cancelled: true, error: HLS_TEXT.cancelled }
       const bounds = spanOf(index, request.files.length)
       let lastPaint = 0
+      const rateSamples: Array<{ at: number; bytes: number }> = []
       const fetched: BilibiliFetchResult = await fetchBilibiliFile(file.url, signal, {
         fetchImpl: deps.fetchImpl,
         role: file.role,
         onProgress(received, total) {
           const now = Date.now()
+          const speed = slidingMegabyteRate(rateSamples, now, received)
           if (now - lastPaint < 200 && received !== total) return
           lastPaint = now
           const fraction = total && total > 0 ? Math.min(1, received / total) : 0
@@ -163,7 +176,7 @@ export async function runBilibiliDownload(
               key,
               job({
                 phase: 'downloading',
-                message: progressText(file.role, received, total),
+                message: bilibiliProgressText(file.role, received, total, speed),
                 completed,
                 total: PROGRESS_TOTAL,
                 warning,

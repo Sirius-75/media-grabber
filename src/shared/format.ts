@@ -33,3 +33,32 @@ export function formatBytes(size: number | null | undefined): string {
   const text = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
   return `${text} ${UNITS[unitIndex]}`
 }
+
+/** 进度文字里附带的速度窗口。只看最近这几秒，避免被开头的慢启动拖住。 */
+export const BYTE_RATE_WINDOW_MS = 3000
+
+/**
+ * 用最近几秒的样本算平均速度，写成「1.5 MB/s」。
+ * 会改 samples：留下窗口内的点。样本不够、间隔太短或速度不是正数时不显示。
+ */
+export function slidingMegabyteRate(
+  samples: Array<{ at: number; bytes: number }>,
+  at: number,
+  bytes: number,
+  windowMs = BYTE_RATE_WINDOW_MS,
+): string | undefined {
+  if (!Number.isFinite(at) || !Number.isFinite(bytes)) return undefined
+  samples.push({ at, bytes })
+  const cutoff = at - windowMs
+  while (samples.length > 1 && (samples[0]?.at ?? 0) < cutoff) samples.shift()
+  const first = samples[0]
+  if (!first || samples.length < 2) return undefined
+  const seconds = (at - first.at) / 1000
+  if (seconds < 0.4) return undefined
+  const perSecond = (bytes - first.bytes) / seconds
+  if (!Number.isFinite(perSecond) || perSecond <= 0) return undefined
+  const rounded = Math.round((perSecond / (1024 * 1024)) * 10) / 10
+  if (rounded <= 0) return undefined
+  const text = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
+  return `${text} MB/s`
+}

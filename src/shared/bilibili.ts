@@ -43,6 +43,7 @@ export const BILIBILI_TEXT = {
   noAudio: '没有可一起下载的音频',
   noAudioTrack: '没有找到可下载的音频',
   partial: '服务器只返回了部分内容，无法保存完整文件',
+  rangeMismatch: '分段响应和请求的范围不一致，已停止下载',
   missing: '找不到媒体文件（404）',
   uncertain: '未能判断音视频类型，已保存为 .mp4',
   audioCancelled: '视频已保存。音频下载已取消',
