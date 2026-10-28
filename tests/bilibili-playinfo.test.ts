@@ -3,6 +3,7 @@
  * 地址只用来检查解析和去重，不能拿去请求。
  */
 import { describe, expect, it } from 'vitest'
+import { decideSaveExt } from '../src/shared/bilibili-file'
 import {
   BILIBILI_FILE_NOTE,
   BILIBILI_M4S_LABEL,
@@ -266,8 +267,30 @@ describe('下载文件选择（示例数据）', () => {
     })
   })
 
+  it('只下载音频时只规划带宽最高的一条，扩展名是 m4a', () => {
+    const planned = planBilibiliFiles([video, quiet, loud], video.url, true, true)
+    expect(planned).toEqual({
+      ok: true,
+      files: [{ url: loud.url, role: 'audio' }],
+    })
+    expect(planBilibiliFiles([quiet, loud], quiet.url, false, true)).toEqual({
+      ok: true,
+      files: [{ url: loud.url, role: 'audio' }],
+    })
+    if (planned.ok) {
+      expect(decideSaveExt(planned.files[0]?.role, undefined, new Uint8Array()).ext).toBe('m4a')
+    }
+    expect(planBilibiliFiles([video], video.url, false, true)).toEqual({
+      ok: false,
+      error: BILIBILI_TEXT.noAudioTrack,
+    })
+  })
+
   it('页面轨和直链的说明分开写', () => {
+    expect(BILIBILI_NOTE).toContain('下载视频')
+    expect(BILIBILI_NOTE).toContain('下载音频')
     expect(BILIBILI_NOTE).toContain('分开保存')
+    expect(BILIBILI_NOTE).not.toContain('下载视频+音频')
     expect(BILIBILI_FILE_NOTE).toContain('刷新页面')
   })
 })

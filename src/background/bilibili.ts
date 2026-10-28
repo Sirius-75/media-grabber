@@ -66,7 +66,7 @@ async function download(message: BilibiliDownloadMessage): Promise<unknown> {
   const pageUrl = await pageUrlOf(tabId)
   if (!pageUrl) return { ok: false, error: BILIBILI_TEXT.badPage }
   const items = tabId === undefined ? [] : await getItems(tabId)
-  const planned = planBilibiliFiles(items, primary, message.withAudio === true)
+  const planned = planBilibiliFiles(items, primary, message.withAudio === true, message.audioOnly === true)
   if (!planned.ok) return planned
   const context = await downloadContext(tabId, primary)
   return runBilibiliWithReferer(

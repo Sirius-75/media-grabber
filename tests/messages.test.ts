@@ -274,6 +274,27 @@ describe('B 站消息', () => {
         withAudio: 'yes',
       }),
     ).toBe(false)
+    expect(
+      isBilibiliDownloadMessage({
+        type: MESSAGE_TYPE.BILIBILI_DOWNLOAD,
+        url: 'https://cdn.example.test/example-data/a.m4s',
+        audioOnly: true,
+      }),
+    ).toBe(true)
+    expect(
+      isBilibiliDownloadMessage({
+        type: MESSAGE_TYPE.BILIBILI_DOWNLOAD,
+        url: 'https://cdn.example.test/example-data/a.m4s',
+        audioOnly: false,
+      }),
+    ).toBe(true)
+    expect(
+      isBilibiliDownloadMessage({
+        type: MESSAGE_TYPE.BILIBILI_DOWNLOAD,
+        url: 'https://cdn.example.test/example-data/a.m4s',
+        audioOnly: 'yes',
+      }),
+    ).toBe(false)
     expect(isBilibiliCancelMessage({ type: MESSAGE_TYPE.BILIBILI_CANCEL, url: 'https://cdn.example.test/a.m4s' })).toBe(
       true,
     )
@@ -306,6 +327,7 @@ describe('isExtensionMessage', () => {
         type: MESSAGE_TYPE.BILIBILI_DOWNLOAD,
         url: 'https://cdn.example.test/example-data/v.m4s',
         withAudio: false,
+        audioOnly: true,
       }),
     ).toBe(true)
     expect(isExtensionMessage({ type: MESSAGE_TYPE.BILIBILI_SYNC })).toBe(true)

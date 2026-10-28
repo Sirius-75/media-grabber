@@ -20,6 +20,7 @@ import {
   kindLabel,
   renderList,
   setRowStatus,
+  sortItemsForPopup,
   statusForItem,
   statusFromDownloadResponse,
   truncateUrl,
@@ -528,8 +529,77 @@ describe('DASH 下载界面', () => {
   })
 })
 
+describe('列表排序', () => {
+  it('能下载的在前，blob 和没有按钮的在后，组内顺序不变', () => {
+    const first = item({ url: 'https://cdn.example/a.mp4', kind: 'video', ext: 'mp4' })
+    const second = item({ url: 'https://cdn.example/b.mp4', kind: 'video', ext: 'mp4' })
+    const blocked = item({
+      url: 'https://cdn.example/locked.mp4',
+      kind: 'video',
+      downloadable: false,
+    })
+    const bili = item({
+      url: 'https://cdn.example.test/example-data/v.m4s',
+      kind: 'video',
+      downloadable: false,
+      bilibili: { role: 'video', label: 'B站视频 1080P' },
+    })
+    const source = [blobVideo, first, dataAudio, hls, second, blocked, bili]
+    const sorted = sortItemsForPopup(source)
+    expect(sorted.map((entry) => entry.url)).toEqual([
+      first.url,
+      hls.url,
+      second.url,
+      bili.url,
+      blobVideo.url,
+      dataAudio.url,
+      blocked.url,
+    ])
+    expect(source.map((entry) => entry.url)).toEqual([
+      blobVideo.url,
+      first.url,
+      dataAudio.url,
+      hls.url,
+      second.url,
+      blocked.url,
+      bili.url,
+    ])
+
+    const list = document.createElement('ul')
+    const titles = () => [...list.querySelectorAll('.url')].map((node) => node.getAttribute('title'))
+    renderList(list, source)
+    const resting = titles()
+    expect(resting).toEqual(sorted.map((entry) => entry.url))
+    renderList(list, source, {
+      [second.url]: { phase: 'started', message: '已开始下载', updatedAt: 1 },
+    })
+    expect(titles()).toEqual(resting)
+    renderList(list, source, undefined, {
+      [hls.url]: {
+        phase: 'downloading',
+        message: '正在下载 1 / 4',
+        completed: 1,
+        total: 4,
+        updatedAt: 2,
+      },
+    })
+    expect(titles()).toEqual(resting)
+    expect(list.querySelector('.item')?.getAttribute('data-index')).toBe('1')
+
+    const downloads: string[] = []
+    bindListActions(list, () => source, {
+      onCopy: () => undefined,
+      onDownload(url) {
+        downloads.push(url)
+      },
+    })
+    list.querySelector<HTMLButtonElement>('[data-action="download"]')?.click()
+    expect(downloads).toEqual([first.url])
+  })
+})
+
 describe('B 站分轨按钮（示例数据）', () => {
-  it('视频和音频分开下载，不出现普通直链按钮', () => {
+  it('视频条目有下载视频和下载音频，音频条目只有下载音频', () => {
     const list = document.createElement('ul')
     document.body.append(list)
     const video = item({
@@ -547,33 +617,80 @@ describe('B 站分轨按钮（示例数据）', () => {
       downloadable: false,
       bilibili: { role: 'audio', label: 'B站音频 192kbps', bandwidth: 192000 },
     })
-    const downloads: Array<{ url: string; withAudio: boolean }> = []
+    const downloads: Array<{ url: string; mode: 'with-audio' | 'audio-only' | 'video-only' }> = []
     renderList(list, [video, audio])
     bindListActions(list, () => [video, audio], {
       onCopy: () => undefined,
       onDownload: () => undefined,
       onBilibiliDownload(url) {
-        downloads.push({ url, withAudio: false })
+        downloads.push({ url, mode: 'video-only' })
       },
       onBilibiliWithAudio(url) {
-        downloads.push({ url, withAudio: true })
+        downloads.push({ url, mode: 'with-audio' })
+      },
+      onBilibiliAudio(url) {
+        downloads.push({ url, mode: 'audio-only' })
       },
     })
     expect(list.querySelector('[data-action="download"]')).toBeNull()
     expect(list.querySelector('.tag-bilibili')?.textContent).toBe('B站视频 1080P · AVC')
-    expect([...list.querySelectorAll('button')].map((button) => button.textContent)).toEqual([
-      '复制',
-      '下载视频',
-      '下载视频+音频',
-      '复制',
-      '下载音频',
-    ])
-    list.querySelector<HTMLButtonElement>('[data-action="bilibili-with-audio"]')?.click()
-    list.querySelector<HTMLButtonElement>('[data-action="bilibili-download"]')?.click()
+    const labels = [...list.querySelectorAll('button')].map((button) => button.textContent)
+    expect(labels).toEqual(['复制', '下载视频', '下载音频', '复制', '下载音频'])
+    expect(labels).not.toContain('下载视频+音频')
+    expect(labels).not.toContain('下载（带声音）')
+    expect(labels).not.toContain('下载（无声）')
+    expect(list.querySelector('.note')?.textContent).toBe('分开保存')
+    expect(list.querySelector('.note')?.textContent).not.toContain('没找到音频')
+    const videoRow = list.querySelectorAll('.item')[0]
+    videoRow?.querySelector<HTMLButtonElement>('[data-action="bilibili-with-audio"]')?.click()
+    videoRow?.querySelector<HTMLButtonElement>('[data-action="bilibili-audio"]')?.click()
+    list.querySelectorAll('.item')[1]?.querySelector<HTMLButtonElement>('[data-action="bilibili-audio"]')?.click()
     expect(downloads).toEqual([
-      { url: video.url, withAudio: true },
-      { url: video.url, withAudio: false },
+      { url: video.url, mode: 'with-audio' },
+      { url: video.url, mode: 'audio-only' },
+      { url: audio.url, mode: 'audio-only' },
     ])
+  })
+
+  it('没有配对音频时，下载视频只下视频，并写明没有声音', () => {
+    const list = document.createElement('ul')
+    const video = item({
+      url: 'https://cdn.example.test/example-data/v.m4s',
+      kind: 'video',
+      ext: 'm4s',
+      downloadable: false,
+      note: '只下载页面当前能播放的内容。',
+      bilibili: { role: 'video', label: 'B站视频 1080P · AVC' },
+    })
+    const downloads: string[] = []
+    renderList(list, [video])
+    bindListActions(list, () => [video], {
+      onCopy: () => undefined,
+      onDownload: () => undefined,
+      onBilibiliDownload(url) {
+        downloads.push(url)
+      },
+      onBilibiliWithAudio() {
+        downloads.push('with-audio')
+      },
+      onBilibiliAudio() {
+        downloads.push('audio-only')
+      },
+    })
+    expect([...list.querySelectorAll('button')].map((button) => button.textContent)).toEqual(['复制', '下载视频'])
+    expect(list.querySelector('[data-action="bilibili-audio"]')).toBeNull()
+    expect(list.querySelector('[data-action="bilibili-with-audio"]')).toBeNull()
+    expect(list.querySelector('.note')?.textContent).toContain('没找到音频，下载的视频没有声音')
+    list.querySelector<HTMLButtonElement>('[data-action="bilibili-download"]')?.click()
+    expect(downloads).toEqual([video.url])
+  })
+
+  it('DASH 清单仍然只有一颗下载', () => {
+    const list = document.createElement('ul')
+    renderList(list, [dash])
+    expect([...list.querySelectorAll('button')].map((button) => button.textContent)).toEqual(['复制', '下载'])
+    expect(list.querySelector('[data-action="dash-download"]')?.textContent).toBe('下载')
+    expect(list.querySelector('[data-action="bilibili-with-audio"]')).toBeNull()
   })
 })
 
