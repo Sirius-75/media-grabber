@@ -127,14 +127,14 @@ export interface DashSyncMessage {
 /**
  * popup → background。下载一条 B 站分轨。
  * withAudio 再带上带宽最高的音频，并按 separate 决定是否合并。
- * audioOnly 只下页面上带宽最高的音频，不带视频。
+ * audioOnly 只下音频，不带视频。点在音频行上时下这一条，否则下带宽最高的。
  */
 export interface BilibiliDownloadMessage {
   type: typeof MESSAGE_TYPE.BILIBILI_DOWNLOAD
   url: string
   tabId?: number
   withAudio?: boolean
-  /** 只下载带宽最高的音频轨。为 true 时忽略 withAudio。 */
+  /** 只下载音频，不带视频。点在音频行上时下这一条，否则下带宽最高的。为 true 时忽略 withAudio。 */
   audioOnly?: boolean
   /** 勾选「分开保存视频和音频」时为 true。只对 withAudio 有意义。缺省表示合并。 */
   separate?: boolean

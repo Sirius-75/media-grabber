@@ -24,7 +24,7 @@ export const BILIBILI_M4S_LABEL = 'B站 m4s 分轨文件'
 
 /** 页面 playinfo 里的视频或音频。 */
 export const BILIBILI_NOTE =
-  '只下载页面当前能播放的内容，不支持会员专享。「下载视频」默认合并成一个 mp4，也可以勾选「分开保存视频和音频」。「下载音频」只保存码率最高的音轨。链接有有效期，失效后请先刷新页面再下载。'
+  '只下载页面当前能播放的内容，不支持会员专享。「下载视频」默认合并成一个 mp4，也可以勾选「分开保存视频和音频」。视频行的「下载音频」保存码率最高的音轨，音频行保存这一条。链接有有效期，失效后请先刷新页面再下载。'
 
 /** 老式 durl 的单个 mp4。 */
 export const BILIBILI_FILE_NOTE =
@@ -517,6 +517,10 @@ export function planBilibiliFiles(
   const url = normalizeUrl(primaryUrl) || primaryUrl.trim()
   if (!httpUrl(url)) return { ok: false, error: BILIBILI_TEXT.badMedia }
   if (audioOnly) {
+    const primary = items.find((item) => item.url === url)
+    if (primary?.bilibili?.role === 'audio') {
+      return { ok: true, files: [{ url, role: 'audio' }] }
+    }
     const audioUrl = highestBilibiliAudioUrl(items)
     if (!audioUrl) return { ok: false, error: BILIBILI_TEXT.noAudioTrack }
     return { ok: true, files: [{ url: audioUrl, role: 'audio' }] }

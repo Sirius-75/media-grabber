@@ -267,18 +267,18 @@ describe('下载文件选择（示例数据）', () => {
     })
   })
 
-  it('只下载音频时只规划带宽最高的一条，扩展名是 m4a', () => {
-    const planned = planBilibiliFiles([video, quiet, loud], video.url, true, true)
-    expect(planned).toEqual({
+  it('只下载音频：音频行下这一条，视频行下带宽最高的', () => {
+    const fromVideo = planBilibiliFiles([video, quiet, loud], video.url, true, true)
+    expect(fromVideo).toEqual({
       ok: true,
       files: [{ url: loud.url, role: 'audio' }],
     })
-    expect(planBilibiliFiles([quiet, loud], quiet.url, false, true)).toEqual({
+    expect(planBilibiliFiles([video, quiet, loud], quiet.url, false, true)).toEqual({
       ok: true,
-      files: [{ url: loud.url, role: 'audio' }],
+      files: [{ url: quiet.url, role: 'audio' }],
     })
-    if (planned.ok) {
-      expect(decideSaveExt(planned.files[0]?.role, undefined, new Uint8Array()).ext).toBe('m4a')
+    if (fromVideo.ok) {
+      expect(decideSaveExt(fromVideo.files[0]?.role, undefined, new Uint8Array()).ext).toBe('m4a')
     }
     expect(planBilibiliFiles([video], video.url, false, true)).toEqual({
       ok: false,
