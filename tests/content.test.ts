@@ -581,7 +581,7 @@ describe('Content Script DOM 扫描', () => {
           kind: 'video',
           ext: 'm4s',
           downloadable: false,
-          note: '只下载页面当前能播放的内容，不支持会员专享。视频和音频分开保存，扩展不能把两路 fMP4 合成一个文件。链接有有效期，失效后请先刷新页面再下载。',
+          note: '只下载页面当前能播放的内容，不支持会员专享。视频和音频默认合并成一个 mp4，也可以勾选「分开保存视频和音频」。链接有有效期，失效后请先刷新页面再下载。',
           bilibili: {
             role: 'video',
             label: 'B站视频 1080P · AVC',
@@ -596,7 +596,7 @@ describe('Content Script DOM 扫描', () => {
           kind: 'audio',
           ext: 'm4s',
           downloadable: false,
-          note: '只下载页面当前能播放的内容，不支持会员专享。视频和音频分开保存，扩展不能把两路 fMP4 合成一个文件。链接有有效期，失效后请先刷新页面再下载。',
+          note: '只下载页面当前能播放的内容，不支持会员专享。视频和音频默认合并成一个 mp4，也可以勾选「分开保存视频和音频」。链接有有效期，失效后请先刷新页面再下载。',
           bilibili: {
             role: 'audio',
             label: 'B站音频 192kbps',

@@ -79,7 +79,7 @@ describe('解析 MPD', () => {
       'https://origin.example/dash/media/main-audio/2.m4s',
     ])
     expect(plan.urls.some((url) => url.includes('token'))).toBe(false)
-    expect(plan.warning).toContain('两个文件')
+    expect(plan.warning).toContain('合并')
     expect(plan.warning).toContain('带宽最高')
     expect(plan.files.map((file) => file.ext)).toEqual(['mp4', 'm4a'])
   })

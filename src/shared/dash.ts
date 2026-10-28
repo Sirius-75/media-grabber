@@ -5,8 +5,8 @@
  * 直播、DRM、多个 Period、SegmentBase、字幕合并都不做。
  * 相对地址按标准 URL 规则拼到清单或 BaseURL 上，不把清单 query 里的 token 抄到分片上。
  *
- * 视频和音频常常是两个 AdaptationSet。mux.js 只能把 MPEG-TS 转成 fMP4，
- * 不能把两路已经分开的 fMP4 合成一个文件。这里的计划是各拼各的，保存成两个文件。
+ * 视频和音频常常是两个 AdaptationSet。计划里仍是两路地址。
+ * 下载完默认合并成一个 mp4；合并失败、超过 1GB，或用户选择分开时，再各存一份。
  */
 
 import { assessHlsSize, isHttpUrl, joinWarnings, sortVariants, variantLabel, type HlsVariant } from './hls'

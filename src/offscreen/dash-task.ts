@@ -1,18 +1,20 @@
 /**
  * 在 offscreen 文档里下载 DASH 分片。
  * 不在 service worker 里跑。不设置请求头。
- * 视频和音频分开保存，不尝试把两路 fMP4 合成一个文件。
+ * 视频和音频默认合并成一个 mp4。合并失败、超过 1GB，或用户选择分开时，仍各存一份。
  * 拼好的 Blob 交给后台保存。这里不调用下载 API。
  */
 
 import { describeDashFetchFailure, parseMpd, planDashDownload } from '../shared/dash'
 import { DASH_TEXT } from '../shared/dash-text'
+import { FMP4_MERGE_TEXT } from '../shared/fmp4-merge'
 import { buildDownloadFilename } from '../shared/filename'
 import { downloadSegmentsInOrder } from '../shared/hls-download'
 import { fetchPlaylistText, fetchSegmentBytes } from '../shared/hls-fetch'
 import { HLS_TEXT, describePlaylistStatus, hlsProgressText } from '../shared/hls'
 import type { HlsJobRecord } from '../shared/hls-job'
 import { inspectFailureMessage, settleJob } from './failure'
+import { saveVideoAndAudio } from './merged-save'
 import { saveBlobFile } from './runtime-bridge'
 
 export interface DashRequest {
@@ -20,6 +22,8 @@ export interface DashRequest {
   representationId?: string
   title?: string
   index?: number
+  /** 用户勾选了分开保存。默认合并。 */
+  separate?: boolean
 }
 
 export interface DashHost {
@@ -33,6 +37,12 @@ export interface DashHost {
 }
 
 let inspecting: { key: string; controller: AbortController } | undefined
+
+function chosenWarning(warning: string | undefined, separate: boolean): string | undefined {
+  if (!warning || !separate) return warning
+  if (!warning.includes(DASH_TEXT.separatePlan)) return warning
+  return warning.split(DASH_TEXT.separatePlan).join(DASH_TEXT.separateChosenPlan)
+}
 
 function warn(message: string, error: unknown): void {
   console.warn(`[media-grabber] ${message}`, error)
@@ -61,7 +71,7 @@ async function loadManifest(url: string, signal: AbortSignal) {
   return parseMpd(fetched.text, url)
 }
 
-export async function inspectDash(playlistUrl: string, host: DashHost): Promise<unknown> {
+export async function inspectDash(playlistUrl: string, host: DashHost, separate = false): Promise<unknown> {
   if (host.isActive(playlistUrl)) return { ok: false, error: HLS_TEXT.busy }
   inspecting?.controller.abort()
   const controller = new AbortController()
@@ -85,7 +95,7 @@ export async function inspectDash(playlistUrl: string, host: DashHost): Promise<
           message: DASH_TEXT.picking,
           completed: 0,
           total: 0,
-          warning: plan.warning,
+          warning: chosenWarning(plan.warning, separate),
           variants: plan.variants,
         }),
       )
@@ -94,7 +104,8 @@ export async function inspectDash(playlistUrl: string, host: DashHost): Promise<
         kind: 'master',
         variants: plan.variants,
       }
-      if (plan.warning) response.warning = plan.warning
+      const warning = chosenWarning(plan.warning, separate)
+      if (warning) response.warning = warning
       return response
     }
     const response: { ok: true; kind: 'media'; total: number; container: 'mp4'; warning?: string } = {
@@ -103,7 +114,8 @@ export async function inspectDash(playlistUrl: string, host: DashHost): Promise<
       total: plan.total,
       container: 'mp4',
     }
-    if (plan.warning) response.warning = plan.warning
+    const warning = chosenWarning(plan.warning, separate)
+    if (warning) response.warning = warning
     return response
   } catch (error) {
     if (controller.signal.aborted) {
@@ -141,6 +153,9 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
       await host.write(key, job({ phase: 'failed', message: DASH_TEXT.picking, completed: 0, total: 0 }), controller)
       return
     }
+    const warning = chosenWarning(plan.warning, request.separate === true)
+    if (warning) plan.warning = warning
+    else delete plan.warning
 
     const total = plan.total
     let completed = 0
@@ -204,17 +219,78 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
     }
 
     let offset = 0
-    const saved: string[] = []
-    for (const file of plan.files) {
+    const groups = plan.files.map((file) => {
       const parts = result.parts.slice(offset, offset + file.urls.length)
       offset += file.urls.length
+      return { file, parts }
+    })
+    const videoGroup = groups.find((group) => group.file.kind === 'video')
+    const audioGroup = groups.find((group) => group.file.kind === 'audio')
+    const wantMerge = request.separate !== true && groups.length === 2 && videoGroup !== undefined && audioGroup !== undefined
+    if (wantMerge && videoGroup && audioGroup) {
+      const outcome = await saveVideoAndAudio({
+        separate: false,
+        signal,
+        still: () => host.still(controller),
+        writeMerging: () =>
+          host.write(
+            key,
+            job({
+              phase: 'merging',
+              message: FMP4_MERGE_TEXT.merging,
+              completed: total,
+              total,
+              warning: plan.warning,
+            }),
+            controller,
+          ),
+        save: saveBlobFile,
+        video: {
+          parts: videoGroup.parts,
+          mime: videoGroup.file.mime,
+          filename: buildDownloadFilename({ title: request.title, url: key, ext: videoGroup.file.ext, index: request.index }),
+        },
+        audio: {
+          parts: audioGroup.parts,
+          mime: audioGroup.file.mime,
+          filename: buildDownloadFilename({ title: request.title, url: key, ext: audioGroup.file.ext, index: request.index }),
+        },
+        mergedFilename: buildDownloadFilename({ title: request.title, url: key, ext: 'mp4', index: request.index }),
+      })
+      if (!host.still(controller)) return
+      if (!outcome.ok) {
+        await settleJob(() =>
+          host.write(
+            key,
+            job({
+              phase: 'cancelled' in outcome && outcome.cancelled ? 'cancelled' : 'failed',
+              message: outcome.error,
+              completed: total,
+              total,
+              warning: plan.warning,
+            }),
+            controller,
+          ),
+        )
+        return
+      }
+      await host.write(
+        key,
+        job({ phase: 'complete', message: outcome.message, completed: total, total, warning: plan.warning }),
+        controller,
+      )
+      return
+    }
+
+    const saved: string[] = []
+    for (const group of groups) {
       const filename = buildDownloadFilename({
         title: request.title,
         url: key,
-        ext: file.ext,
+        ext: group.file.ext,
         index: request.index,
       })
-      const savedFile = await saveBlobFile(parts, file.mime, filename)
+      const savedFile = await saveBlobFile(group.parts, group.file.mime, filename)
       if (!host.still(controller)) return
       if (!savedFile.ok) {
         const message = saved.length > 0 ? DASH_TEXT.audioSaveFailed : savedFile.error
@@ -227,11 +303,13 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
       console.info('[media-grabber] DASH 已保存', savedFile.downloadId, filename)
     }
 
+    const separateMessage =
+      request.separate === true && plan.separateAudio ? FMP4_MERGE_TEXT.separateChosen : HLS_TEXT.complete
     await host.write(
       key,
       job({
         phase: 'complete',
-        message: plan.separateAudio ? DASH_TEXT.separateDone : HLS_TEXT.complete,
+        message: separateMessage,
         completed: total,
         total,
         warning: plan.warning,

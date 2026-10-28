@@ -39,7 +39,7 @@ import { cancelStoredJob, putJob, saveBlobFile } from './runtime-bridge'
 
 const ROLE = 'offscreen'
 const HLS_CANCEL_PHASES = ['downloading', 'inspecting', 'picking', 'remuxing'] as const
-const DASH_CANCEL_PHASES = ['downloading', 'inspecting', 'picking'] as const
+const DASH_CANCEL_PHASES = ['downloading', 'inspecting', 'picking', 'merging'] as const
 
 interface DownloadRequest {
   playlistUrl: string
@@ -487,16 +487,17 @@ function readBilibiliFiles(value: unknown): BilibiliDownloadFile[] | undefined {
 
 function readBilibiliRequest(
   value: Record<string, unknown>,
-): { key: string; files: BilibiliDownloadFile[]; title?: string; index?: number } | undefined {
+): { key: string; files: BilibiliDownloadFile[]; title?: string; index?: number; separate?: boolean } | undefined {
   if (typeof value.key !== 'string' || value.key.trim() === '') return undefined
   const files = readBilibiliFiles(value.files)
   if (!files) return undefined
-  const request: { key: string; files: BilibiliDownloadFile[]; title?: string; index?: number } = {
+  const request: { key: string; files: BilibiliDownloadFile[]; title?: string; index?: number; separate?: boolean } = {
     key: value.key.trim(),
     files,
   }
   if (typeof value.title === 'string' && value.title.trim()) request.title = value.title
   if (typeof value.index === 'number' && Number.isInteger(value.index) && value.index >= 1) request.index = value.index
+  if (value.separate === true) request.separate = true
   return request
 }
 
@@ -545,6 +546,7 @@ function startBilibiliDownload(request: {
   files: BilibiliDownloadFile[]
   title?: string
   index?: number
+  separate?: boolean
 }): { ok: true } | { ok: false; error: string } {
   if (active && active.key !== request.key) return { ok: false, error: HLS_TEXT.busy }
   if (active?.key === request.key) active.controller.abort()
@@ -572,7 +574,7 @@ function cancelBilibili(key: string): { ok: true } {
   }
   void enqueue(async () => {
     try {
-      await cancelStoredJob(BILIBILI_JOB_STORAGE_KEY, key, ['downloading'])
+      await cancelStoredJob(BILIBILI_JOB_STORAGE_KEY, key, ['downloading', 'merging'])
     } catch (error) {
       warn('取消任务状态失败', error)
     }
@@ -638,9 +640,9 @@ function cancelDash(playlistUrl: string): { ok: true } {
 
 function readDashRequest(
   value: Record<string, unknown>,
-): { playlistUrl: string; representationId?: string; title?: string; index?: number } | undefined {
+): { playlistUrl: string; representationId?: string; title?: string; index?: number; separate?: boolean } | undefined {
   if (typeof value.playlistUrl !== 'string' || value.playlistUrl.trim() === '') return undefined
-  const request: { playlistUrl: string; representationId?: string; title?: string; index?: number } = {
+  const request: { playlistUrl: string; representationId?: string; title?: string; index?: number; separate?: boolean } = {
     playlistUrl: value.playlistUrl.trim(),
   }
   if (typeof value.representationId === 'string' && value.representationId.trim()) {
@@ -648,6 +650,7 @@ function readDashRequest(
   }
   if (typeof value.title === 'string' && value.title.trim()) request.title = value.title
   if (typeof value.index === 'number' && Number.isInteger(value.index) && value.index >= 1) request.index = value.index
+  if (value.separate === true) request.separate = true
   return request
 }
 
@@ -684,7 +687,7 @@ export function startOffscreen(): void {
         sendResponse({ ok: false, error: HLS_TEXT.badPlaylistUrl })
         return undefined
       }
-      void inspectDash(message.playlistUrl.trim(), dashHost).then(sendResponse, (error: unknown) => {
+      void inspectDash(message.playlistUrl.trim(), dashHost, message.separate === true).then(sendResponse, (error: unknown) => {
         warn('检查 DASH 清单失败', error)
         sendResponse({ ok: false, error: inspectFailureMessage(error) })
       })

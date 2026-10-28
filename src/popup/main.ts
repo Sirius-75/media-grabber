@@ -58,6 +58,11 @@ let bilibiliJobs: HlsJobMap = {}
 /** 用户在清晰度列表里点过的地址。DASH 里存的是 Representation id。重画时不要跳回默认项。 */
 const preferredVariant = new Map<string, string>()
 
+function wantsSeparate(): boolean {
+  const box = document.querySelector('#separate-media')
+  return box instanceof HTMLInputElement && box.checked
+}
+
 function showBanner(text: string): void {
   if (!(bannerEl instanceof HTMLElement)) return
   bannerEl.hidden = false
@@ -335,7 +340,7 @@ function rememberDash(url: string, record: Omit<HlsJobRecord, 'updatedAt'>): voi
 async function requestDashDownload(url: string): Promise<void> {
   rememberDash(url, { phase: 'inspecting', message: HLS_TEXT.inspecting, completed: 0, total: 0 })
   paint()
-  const message: DashInspectMessage = { type: MESSAGE_TYPE.DASH_INSPECT, url }
+  const message: DashInspectMessage = { type: MESSAGE_TYPE.DASH_INSPECT, url, separate: wantsSeparate() }
   if (tabId !== undefined) message.tabId = tabId
   try {
     const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))
@@ -396,7 +401,12 @@ async function startDashDownload(url: string, representationId: string): Promise
     warning: previous?.warning,
   })
   paint()
-  const message: DashDownloadMessage = { type: MESSAGE_TYPE.DASH_DOWNLOAD, url, representationId }
+  const message: DashDownloadMessage = {
+    type: MESSAGE_TYPE.DASH_DOWNLOAD,
+    url,
+    representationId,
+    separate: wantsSeparate(),
+  }
   if (tabId !== undefined) message.tabId = tabId
   try {
     const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))
@@ -436,7 +446,12 @@ function rememberBilibili(url: string, record: Omit<HlsJobRecord, 'updatedAt'>):
 async function requestBilibiliDownload(url: string, withAudio: boolean): Promise<void> {
   rememberBilibili(url, { phase: 'downloading', message: BILIBILI_TEXT.preparing, completed: 0, total: 0 })
   paint()
-  const message: BilibiliDownloadMessage = { type: MESSAGE_TYPE.BILIBILI_DOWNLOAD, url, withAudio }
+  const message: BilibiliDownloadMessage = {
+    type: MESSAGE_TYPE.BILIBILI_DOWNLOAD,
+    url,
+    withAudio,
+    separate: wantsSeparate(),
+  }
   if (tabId !== undefined) message.tabId = tabId
   try {
     const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))

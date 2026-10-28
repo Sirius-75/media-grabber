@@ -24,7 +24,7 @@ export const BILIBILI_M4S_LABEL = 'B站 m4s 分轨文件'
 
 /** 页面 playinfo 里的视频或音频。 */
 export const BILIBILI_NOTE =
-  '只下载页面当前能播放的内容，不支持会员专享。视频和音频分开保存，扩展不能把两路 fMP4 合成一个文件。链接有有效期，失效后请先刷新页面再下载。'
+  '只下载页面当前能播放的内容，不支持会员专享。视频和音频默认合并成一个 mp4，也可以勾选「分开保存视频和音频」。链接有有效期，失效后请先刷新页面再下载。'
 
 /** 老式 durl 的单个 mp4。 */
 export const BILIBILI_FILE_NOTE =

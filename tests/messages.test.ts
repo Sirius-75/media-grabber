@@ -234,6 +234,22 @@ describe('DASH 消息', () => {
     expect(isDashDownloadMessage({ type: MESSAGE_TYPE.DASH_DOWNLOAD, url: 'https://cdn.example/a.mpd', representationId: '  ' })).toBe(
       false,
     )
+    expect(
+      isDashDownloadMessage({
+        type: MESSAGE_TYPE.DASH_DOWNLOAD,
+        url: 'https://cdn.example/a.mpd',
+        representationId: 'video-1080',
+        separate: true,
+      }),
+    ).toBe(true)
+    expect(
+      isDashDownloadMessage({
+        type: MESSAGE_TYPE.DASH_DOWNLOAD,
+        url: 'https://cdn.example/a.mpd',
+        representationId: 'video-1080',
+        separate: 'yes',
+      }),
+    ).toBe(false)
     expect(isDashCancelMessage({ type: MESSAGE_TYPE.DASH_CANCEL, url: 'https://cdn.example/a.mpd' })).toBe(true)
     expect(isDashSyncMessage({ type: MESSAGE_TYPE.DASH_SYNC })).toBe(true)
     expect(isDashSyncMessage({ type: MESSAGE_TYPE.DASH_CANCEL })).toBe(false)
