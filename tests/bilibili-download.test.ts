@@ -6,8 +6,10 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { BILIBILI_TEXT } from '../src/shared/bilibili'
 import { decideSaveExt, fetchBilibiliFile, handlerKind } from '../src/shared/bilibili-file'
+import { FMP4_MERGE_TEXT } from '../src/shared/fmp4-merge'
 import { HLS_TEXT } from '../src/shared/hls'
 import { runBilibiliDownload } from '../src/offscreen/bilibili-task'
+import { buildFmp4 } from './fmp4-fixture'
 
 function fourcc(text: string): Uint8Array {
   return Uint8Array.from(text, (char) => char.charCodeAt(0))
@@ -170,6 +172,122 @@ describe('offscreen 任务不碰扩展 API（示例数据）', () => {
     expect(saved.map((file) => file.filename)).toEqual(['示例标题-2.mp4', '示例标题-2.m4a'])
     expect(saved.map((file) => file.type)).toEqual(['video/mp4', 'audio/mp4'])
     expect(writes.at(-1)).toContain('分开保存')
+    expect(writes).toContain(FMP4_MERGE_TEXT.merging)
+  })
+
+  it('能合并时只存一个 mp4，勾选分开则跳过合并', async () => {
+    const video = buildFmp4({
+      handler: 'vide',
+      movieTimescale: 1000,
+      mediaTimescale: 100,
+      fragments: [{ decodeTime: 0n, samples: [{ duration: 100, payload: Uint8Array.from([1, 2, 3, 4]) }] }],
+    })
+    const audio = buildFmp4({
+      handler: 'soun',
+      movieTimescale: 1000,
+      mediaTimescale: 1000,
+      fragments: [{ decodeTime: 0n, samples: [{ duration: 1000, payload: Uint8Array.from([5, 6, 7, 8]) }] }],
+    })
+    const saved: string[] = []
+    const writes: string[] = []
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const target = String(input)
+      if (target.includes('audio')) return responseOf(200, audio, { 'Content-Type': 'audio/mp4' })
+      return responseOf(200, video, { 'Content-Type': 'video/mp4' })
+    })
+    const host = {
+      still: () => true,
+      clear: () => undefined,
+      write: async (_key: string, record: { message: string }) => {
+        writes.push(record.message)
+      },
+    }
+    const files = [
+      { url: 'https://cdn.example.test/example-data/video.m4s', role: 'video' as const },
+      { url: 'https://cdn.example.test/example-data/audio.m4s', role: 'audio' as const },
+    ]
+    const merged = await runBilibiliDownload(
+      { key: files[0]!.url, title: '示例标题', index: 2, files },
+      new AbortController(),
+      host,
+      {
+        fetchImpl,
+        save: async (_parts, _mime, filename) => {
+          saved.push(filename)
+          return { ok: true, downloadId: 7 }
+        },
+      },
+    )
+    expect(merged).toEqual({ ok: true })
+    expect(saved).toEqual(['示例标题-2.mp4'])
+    expect(writes).toContain('正在合并…')
+    expect(writes.at(-1)).toContain('已合并')
+
+    saved.length = 0
+    writes.length = 0
+    const separate = await runBilibiliDownload(
+      { key: files[0]!.url, title: '示例标题', index: 2, files, separate: true },
+      new AbortController(),
+      host,
+      {
+        fetchImpl,
+        save: async (_parts, _mime, filename) => {
+          saved.push(filename)
+          return { ok: true, downloadId: 8 }
+        },
+      },
+    )
+    expect(separate).toEqual({ ok: true })
+    expect(saved).toEqual(['示例标题-2.mp4', '示例标题-2.m4a'])
+    expect(writes).not.toContain('正在合并…')
+    expect(writes.at(-1)).toContain('分开保存')
+  })
+
+  it('合并过程中取消则不保存文件', async () => {
+    const video = buildFmp4({
+      handler: 'vide',
+      movieTimescale: 1000,
+      mediaTimescale: 100,
+      fragments: [{ decodeTime: 0n, samples: [{ duration: 100, payload: Uint8Array.from([1]) }] }],
+    })
+    const audio = buildFmp4({
+      handler: 'soun',
+      movieTimescale: 1000,
+      mediaTimescale: 1000,
+      fragments: [{ decodeTime: 0n, samples: [{ duration: 1000, payload: Uint8Array.from([2]) }] }],
+    })
+    const controller = new AbortController()
+    let saved = 0
+    const outcome = await runBilibiliDownload(
+      {
+        key: 'https://cdn.example.test/example-data/video.m4s',
+        files: [
+          { url: 'https://cdn.example.test/example-data/video.m4s', role: 'video' },
+          { url: 'https://cdn.example.test/example-data/audio.m4s', role: 'audio' },
+        ],
+      },
+      controller,
+      {
+        still: () => !controller.signal.aborted,
+        clear: () => undefined,
+        write: async (_key, record) => {
+          if (record.phase === 'merging') controller.abort()
+        },
+      },
+      {
+        fetchImpl: async (input) => {
+          const target = String(input)
+          if (target.includes('audio')) return responseOf(200, audio)
+          return responseOf(200, video)
+        },
+        save: async () => {
+          saved += 1
+          return { ok: true, downloadId: 1 }
+        },
+      },
+    )
+    expect(outcome.cancelled).toBe(true)
+    expect(saved).toBe(0)
   })
 
   it('源码里没有 chrome，DNR 只出现在后台', () => {

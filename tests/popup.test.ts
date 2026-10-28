@@ -512,6 +512,19 @@ describe('DASH 下载界面', () => {
     expect(list.querySelector('.status')?.textContent).toContain('分开保存')
     expect(list.querySelector('.status')?.className).toContain('status-complete')
     expect(list.querySelector('[data-action="dash-download"]')).toBeTruthy()
+
+    renderList(list, [dash], undefined, undefined, undefined, {
+      [dash.url]: {
+        phase: 'merging',
+        message: '正在合并…',
+        completed: 4,
+        total: 4,
+        updatedAt: 4,
+      },
+    })
+    expect(list.querySelector('.status')?.textContent).toBe('正在合并…')
+    expect(list.querySelector('[data-action="dash-cancel"]')).toBeTruthy()
+    expect(list.querySelector('[data-action="dash-download"]')).toBeNull()
   })
 })
 
@@ -571,5 +584,8 @@ describe('样式约束', () => {
     expect(css).toMatch(/overflow-x:\s*hidden/)
     expect(css).toMatch(/overflow-y:\s*auto/)
     expect(css).toMatch(/text-overflow:\s*ellipsis/)
+    const html = readFileSync(join(process.cwd(), 'src/popup/index.html'), 'utf8')
+    expect(html).toContain('分开保存视频和音频')
+    expect(html).toContain('id="separate-media"')
   })
 })

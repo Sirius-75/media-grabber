@@ -87,6 +87,7 @@ async function download(message: BilibiliDownloadMessage): Promise<unknown> {
       }
       if (context.title) payload.title = context.title
       if (context.index !== undefined) payload.index = context.index
+      if (message.separate === true) payload.separate = true
       const started = await sendOffscreen(payload)
       const failed = failureOf(started)
       if (started === undefined || failed) {

@@ -380,7 +380,11 @@ function renderItem(
 
   if (
     hls?.warning &&
-    (hls.phase === 'downloading' || hls.phase === 'picking' || hls.phase === 'failed' || hls.phase === 'remuxing')
+    (hls.phase === 'downloading' ||
+      hls.phase === 'picking' ||
+      hls.phase === 'failed' ||
+      hls.phase === 'remuxing' ||
+      hls.phase === 'merging')
   ) {
     const warning = document.createElement('p')
     warning.className = 'warning'
@@ -444,7 +448,12 @@ function renderItem(
       start.dataset.action = `${prefix}-start`
       start.textContent = '开始下载'
       actions.append(select, start)
-    } else if (hls?.phase === 'downloading' || hls?.phase === 'inspecting' || hls?.phase === 'remuxing') {
+    } else if (
+      hls?.phase === 'downloading' ||
+      hls?.phase === 'inspecting' ||
+      hls?.phase === 'remuxing' ||
+      hls?.phase === 'merging'
+    ) {
       const cancel = document.createElement('button')
       cancel.type = 'button'
       cancel.dataset.action = `${prefix}-cancel`
@@ -461,7 +470,7 @@ function renderItem(
   }
 
   if (!segment && canOfferBilibiliDownload(item) && item.bilibili) {
-    const busy = hls?.phase === 'downloading' || hls?.phase === 'inspecting'
+    const busy = hls?.phase === 'downloading' || hls?.phase === 'inspecting' || hls?.phase === 'merging'
     if (busy) {
       const cancel = document.createElement('button')
       cancel.type = 'button'

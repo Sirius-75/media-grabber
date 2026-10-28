@@ -101,6 +101,8 @@ export interface DashInspectMessage {
   type: typeof MESSAGE_TYPE.DASH_INSPECT
   url: string
   tabId?: number
+  /** 勾选「分开保存视频和音频」时为 true。缺省表示合并。 */
+  separate?: boolean
 }
 
 /** popup → background。representationId 是 Representation 的 id，不是分片地址。 */
@@ -109,6 +111,8 @@ export interface DashDownloadMessage {
   url: string
   representationId: string
   tabId?: number
+  /** 勾选「分开保存视频和音频」时为 true。缺省表示合并。 */
+  separate?: boolean
 }
 
 export interface DashCancelMessage {
@@ -126,6 +130,8 @@ export interface BilibiliDownloadMessage {
   url: string
   tabId?: number
   withAudio?: boolean
+  /** 勾选「分开保存视频和音频」时为 true。缺省表示合并。 */
+  separate?: boolean
 }
 
 export interface BilibiliCancelMessage {
@@ -246,6 +252,7 @@ export function isDashInspectMessage(value: unknown): value is DashInspectMessag
   if (!isRecord(value) || value.type !== MESSAGE_TYPE.DASH_INSPECT) return false
   if (!isHttpishUrl(value.url)) return false
   if (value.tabId !== undefined && !isTabId(value.tabId)) return false
+  if (value.separate !== undefined && typeof value.separate !== 'boolean') return false
   return true
 }
 
@@ -253,6 +260,7 @@ export function isDashDownloadMessage(value: unknown): value is DashDownloadMess
   if (!isRecord(value) || value.type !== MESSAGE_TYPE.DASH_DOWNLOAD) return false
   if (!isHttpishUrl(value.url) || !isHttpishUrl(value.representationId)) return false
   if (value.tabId !== undefined && !isTabId(value.tabId)) return false
+  if (value.separate !== undefined && typeof value.separate !== 'boolean') return false
   return true
 }
 
@@ -269,6 +277,7 @@ export function isBilibiliDownloadMessage(value: unknown): value is BilibiliDown
   if (!isHttpishUrl(value.url)) return false
   if (value.tabId !== undefined && !isTabId(value.tabId)) return false
   if (value.withAudio !== undefined && typeof value.withAudio !== 'boolean') return false
+  if (value.separate !== undefined && typeof value.separate !== 'boolean') return false
   return true
 }
 

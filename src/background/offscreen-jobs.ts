@@ -18,8 +18,8 @@ import {
 } from '../shared/offscreen-bridge'
 
 const HLS_ACTIVE_PHASES = new Set(['downloading', 'inspecting', 'remuxing'])
-const DASH_ACTIVE_PHASES = new Set(['downloading', 'inspecting'])
-const BILIBILI_ACTIVE_PHASES = new Set(['downloading'])
+const DASH_ACTIVE_PHASES = new Set(['downloading', 'inspecting', 'merging'])
+const BILIBILI_ACTIVE_PHASES = new Set(['downloading', 'merging'])
 
 type Ack = { ok: true } | { ok: false; error: string }
 

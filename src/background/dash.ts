@@ -31,11 +31,17 @@ function isFailure(value: unknown): value is { ok: false; error: string } {
   )
 }
 
-async function forwardDownload(playlistUrl: string, representationId: string | undefined, tabId: number | undefined): Promise<unknown> {
+async function forwardDownload(
+  playlistUrl: string,
+  representationId: string | undefined,
+  tabId: number | undefined,
+  separate: boolean,
+): Promise<unknown> {
   const context = await downloadContext(tabId, playlistUrl)
   const message: Record<string, unknown> = {
     type: 'DASH_OFFSCREEN_DOWNLOAD',
     playlistUrl,
+    separate,
   }
   if (representationId) message.representationId = representationId
   if (context.title) message.title = context.title
@@ -62,7 +68,7 @@ async function inspect(message: DashInspectMessage): Promise<unknown> {
     'ok' in inspected &&
     inspected.ok === true
   ) {
-    const started = await forwardDownload(playlistUrl, undefined, message.tabId)
+    const started = await forwardDownload(playlistUrl, undefined, message.tabId, message.separate === true)
     if (started === undefined) return { ok: false, error: HLS_TEXT.offscreen }
     if (isFailure(started)) return started
   }
@@ -79,7 +85,7 @@ async function download(message: DashDownloadMessage): Promise<unknown> {
     warn('打开 offscreen 失败', error)
     return { ok: false, error: HLS_TEXT.offscreen }
   }
-  const started = await forwardDownload(playlistUrl, representationId, message.tabId)
+  const started = await forwardDownload(playlistUrl, representationId, message.tabId, message.separate === true)
   return started ?? { ok: false, error: HLS_TEXT.offscreen }
 }
 

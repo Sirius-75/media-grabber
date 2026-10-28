@@ -16,6 +16,7 @@ export const HLS_JOB_PHASES = [
   'picking',
   'downloading',
   'remuxing',
+  'merging',
   'complete',
   'failed',
   'cancelled',

@@ -64,6 +64,20 @@ button:not(:disabled):hover {
   background: #fffdf8;
 }
 
+.option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #3d5560;
+}
+
+.option input {
+  margin: 0;
+}
+
 .banner {
   margin: 10px 0 0;
   font-size: 12px;
