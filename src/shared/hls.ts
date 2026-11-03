@@ -12,6 +12,7 @@
  */
 
 import { formatBytes } from './format'
+import { largeMergeWarning } from './size-warning'
 
 /** 下载进内存的字节上限。超过就拒绝，避免把扩展页面撑满。 */
 export const HLS_HARD_BYTE_LIMIT = 2 * 1024 * 1024 * 1024
@@ -276,10 +277,14 @@ export function assessHlsSize(input: {
     }
   }
 
-  const warning = joinWarnings([
-    estimatedBytes !== undefined && estimatedBytes >= HLS_WARN_BYTE_LIMIT
+  // 接近合并上限时用更明确的提醒，不再重复一遍「占用较多内存」。
+  const sizeWarning =
+    largeMergeWarning(estimatedBytes) ??
+    (estimatedBytes !== undefined && estimatedBytes >= HLS_WARN_BYTE_LIMIT
       ? hlsWarnBytesText(estimatedBytes)
-      : undefined,
+      : undefined)
+  const warning = joinWarnings([
+    sizeWarning,
     input.segmentCount >= HLS_WARN_SEGMENT_COUNT ? hlsWarnCountText(input.segmentCount) : undefined,
   ])
   if (warning) return { ok: true, warning, estimatedBytes }

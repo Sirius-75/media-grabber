@@ -12,12 +12,14 @@ import {
   canOfferDashDownload,
   canOfferDownload,
   canOfferHlsDownload,
+  canRetryDownload,
   hlsJobForItem,
   downloadFeedback,
   flashButton,
   isMediaItemList,
   itemNote,
   kindLabel,
+  pageTitleText,
   renderList,
   setRowStatus,
   sortItemsForPopup,
@@ -25,6 +27,7 @@ import {
   statusFromDownloadResponse,
   truncateUrl,
 } from '../src/popup/view'
+import { LARGE_MERGE_WARNING } from '../src/shared/size-warning'
 
 function item(overrides: Partial<MediaItem> & Pick<MediaItem, 'url' | 'kind'>): MediaItem {
   return {
@@ -886,6 +889,105 @@ describe('B 站分轨按钮（示例数据）', () => {
     expect(list.querySelector('[data-action="dash-audio"]')).toBeNull()
     list.querySelector<HTMLButtonElement>('[data-action="dash-start"]')?.click()
     expect(starts).toEqual(['audio-main'])
+  })
+})
+
+describe('页面说明和失败重试', () => {
+  it('页面标题优先，没有标题时用主机名', () => {
+    expect(pageTitleText({ title: '示例视频页', url: 'https://example.com/a' })).toBe('示例视频页')
+    expect(pageTitleText({ title: '   ', url: 'https://example.com/a/b?x=1' })).toBe('example.com')
+    expect(pageTitleText({ url: '不是完整地址' })).toBe('当前页面')
+    expect(pageTitleText({})).toBe('当前页面')
+  })
+
+  it('普通直链失败后出现重试按钮，点击只重试这一条', () => {
+    const other = item({ url: 'https://cdn.example/b.mp4', kind: 'video', ext: 'mp4' })
+    const items = [video, other]
+    const list = document.createElement('ul')
+    const retried: string[] = []
+    renderList(list, items, {
+      [video.url]: { phase: 'failed', message: '服务器拒绝访问（403）', updatedAt: 1 },
+    })
+    expect(list.querySelectorAll('[data-action="retry"]')).toHaveLength(1)
+    expect(list.querySelector('[data-action="retry"]')?.textContent).toBe('重试')
+    expect(list.querySelector('.status')?.textContent).toBe('服务器拒绝访问（403）')
+    bindListActions(list, () => items, {
+      onCopy: () => undefined,
+      onDownload: () => undefined,
+      onRetry(url) {
+        retried.push(url)
+      },
+    })
+    list.querySelector<HTMLButtonElement>('[data-action="retry"]')?.click()
+    expect(retried).toEqual([video.url])
+  })
+
+  it('HLS / DASH / B 站任务失败才显示重试，完成和取消不显示', () => {
+    const list = document.createElement('ul')
+    const hlsFailed = {
+      phase: 'failed' as const,
+      message: '服务器拒绝访问（403）',
+      completed: 0,
+      total: 1,
+      updatedAt: 1,
+    }
+    const retried: string[] = []
+    bindListActions(list, () => [hls, dash], {
+      onCopy: () => undefined,
+      onDownload: () => undefined,
+      onRetry(url) {
+        retried.push(url)
+      },
+    })
+    renderList(list, [hls, dash], undefined, { [hls.url]: hlsFailed }, undefined, {
+      [dash.url]: hlsFailed,
+    })
+    expect(list.querySelectorAll('[data-action="retry"]')).toHaveLength(2)
+    expect(list.querySelector('.status')?.textContent).toBe('服务器拒绝访问（403）')
+    list.querySelector<HTMLButtonElement>('[data-action="retry"]')?.click()
+    expect(retried).toEqual([hls.url])
+
+    renderList(list, [hls], undefined, {
+      [hls.url]: {
+        phase: 'complete',
+        message: '已完成',
+        completed: 1,
+        total: 1,
+        updatedAt: 2,
+      },
+    })
+    expect(list.querySelector('[data-action="retry"]')).toBeNull()
+
+    renderList(list, [hls], undefined, {
+      [hls.url]: {
+        phase: 'cancelled',
+        message: '下载已取消',
+        completed: 0,
+        total: 1,
+        updatedAt: 3,
+      },
+    })
+    expect(list.querySelector('[data-action="retry"]')).toBeNull()
+
+    const cancelled = { phase: 'cancelled' as const, message: '下载已取消' }
+    expect(canRetryDownload(hls, undefined, cancelled)).toBe(false)
+    expect(canRetryDownload(hls, undefined, hlsFailed)).toBe(true)
+    expect(canRetryDownload(video, { phase: 'failed' }, undefined)).toBe(true)
+    expect(canRetryDownload(video, { phase: 'complete' }, undefined)).toBe(false)
+  })
+
+  it('B 站视频条目已知总大小接近 1GB 时在说明里提前提示', () => {
+    const big = item({
+      url: 'https://cdn.example.test/example-data/big.m4s',
+      kind: 'video',
+      ext: 'm4s',
+      downloadable: false,
+      size: 950 * 1024 * 1024,
+      bilibili: { role: 'video', label: 'B站视频 1080P' },
+    })
+    const list = document.createElement('ul')
+    renderList(list, [big])
+    expect(list.querySelector('.note')?.textContent).toContain(LARGE_MERGE_WARNING)
   })
 })
 

@@ -14,6 +14,7 @@ import {
 import { formatBytes } from '../shared/format'
 import { queuePosition, queuedStatusText, type DownloadQueueState } from '../shared/download-queue'
 import { DASH_NO_AUDIO_HINT, DASH_NOTE } from '../shared/dash-text'
+import { largeMergeWarning } from '../shared/size-warning'
 import type { HlsJobMap, HlsJobPhase, HlsJobRecord } from '../shared/hls-job'
 import type { BilibiliRole, MediaItem, MediaKind } from '../shared/types'
 
@@ -100,6 +101,22 @@ export function canOfferBilibiliDownload(item: Pick<MediaItem, 'url' | 'bilibili
 
 /** 页面上没有可配对的音频时，写在视频条目说明里。 */
 export const BILIBILI_NO_AUDIO_HINT = '没找到音频，下载的视频没有声音'
+
+/** 列表上方的页面说明：优先用标题，没有标题时用主机名。 */
+export function pageTitleText(tab: { title?: string; url?: string }): string {
+  const title = tab.title?.trim()
+  if (title) return title
+  const url = tab.url?.trim()
+  if (url) {
+    try {
+      const host = new URL(url).hostname
+      if (host) return host
+    } catch {
+      // 不是完整地址时继续用下面的保底文案。
+    }
+  }
+  return '当前页面'
+}
 
 type PopupDownloadItem = Pick<MediaItem, 'url' | 'kind' | 'downloadable' | 'bilibili'>
 
@@ -256,6 +273,7 @@ export function hlsJobForItem(
 export interface ListActions {
   onCopy: (url: string, button: HTMLButtonElement) => void
   onDownload: (url: string, button: HTMLButtonElement) => void
+  onRetry?: (url: string, button: HTMLButtonElement) => void
   onHlsDownload?: (url: string, button: HTMLButtonElement) => void
   onHlsStart?: (url: string, mediaUrl: string, button: HTMLButtonElement) => void
   onHlsCancel?: (url: string, button: HTMLButtonElement) => void
@@ -320,6 +338,7 @@ export function bindListActions(
     if (!item) return
     if (button.dataset.action === 'copy') actions.onCopy(item.url, button)
     if (button.dataset.action === 'download') actions.onDownload(item.url, button)
+    if (button.dataset.action === 'retry') actions.onRetry?.(item.url, button)
     if (button.dataset.action === 'hls-download') actions.onHlsDownload?.(item.url, button)
     if (button.dataset.action === 'hls-cancel') actions.onHlsCancel?.(item.url, button)
     if (button.dataset.action === 'hls-start') {
@@ -550,6 +569,10 @@ function renderItem(
     }
   }
 
+  if (canRetryDownload(item, status, hls)) {
+    actions.append(bilibiliActionButton('retry', '重试'))
+  }
+
   row.append(actions)
   if (hls) {
     const message =
@@ -557,6 +580,19 @@ function renderItem(
     setRowStatus(row, { phase: hlsStatusPhase(hls.phase), message })
   } else if (status) setRowStatus(row, status)
   return row
+}
+
+/**
+ * 失败后重试的按钮条件。
+ * 任务存在时只看这条任务；普通直链和没有任务记录的情况看最近一次下载状态。
+ */
+export function canRetryDownload(
+  item: PopupDownloadItem,
+  status: Pick<DownloadStatusRecord, 'phase'> | undefined,
+  job: Pick<HlsJobRecord, 'phase'> | undefined,
+): boolean {
+  if (job) return job.phase === 'failed'
+  return status?.phase === 'failed' && hasPopupDownloadButton(item)
 }
 
 /** 排队位置来自队列存储，不要求在任务记录里反复改写。 */
@@ -572,7 +608,7 @@ function queuedPositionForItem(item: Pick<MediaItem, 'url'>, queue?: DownloadQue
 
 /** 视频行在没有可配对音频时，说明里补上没有声音。其它条目用原来的说明。 */
 function rowNote(item: MediaItem, pairAudio: boolean, dashJob?: HlsJobRecord): string | undefined {
-  const note = itemNote(item)
+  let note = itemNote(item)
   if (
     item.kind === 'dash' &&
     canOfferDashDownload(item) &&
@@ -580,11 +616,20 @@ function rowNote(item: MediaItem, pairAudio: boolean, dashJob?: HlsJobRecord): s
     dashJob?.hasAudio === false
   ) {
     if (note?.includes(DASH_NO_AUDIO_HINT)) return note
-    return note ? `${note} ${DASH_NO_AUDIO_HINT}` : DASH_NO_AUDIO_HINT
+    note = appendNote(note, DASH_NO_AUDIO_HINT)
   }
-  if (item.bilibili?.role !== 'video' || pairAudio || !canOfferBilibiliDownload(item)) return note
-  if (note?.includes(BILIBILI_NO_AUDIO_HINT)) return note
-  return note ? `${note} ${BILIBILI_NO_AUDIO_HINT}` : BILIBILI_NO_AUDIO_HINT
+  if (item.bilibili?.role === 'video' && canOfferBilibiliDownload(item)) {
+    if (!pairAudio && !note?.includes(BILIBILI_NO_AUDIO_HINT)) {
+      note = appendNote(note, BILIBILI_NO_AUDIO_HINT)
+    }
+    const large = largeMergeWarning(item.size)
+    if (large && !note?.includes(large)) note = appendNote(note, large)
+  }
+  return note
+}
+
+function appendNote(note: string | undefined, addition: string): string {
+  return note ? `${note} ${addition}` : addition
 }
 
 /**

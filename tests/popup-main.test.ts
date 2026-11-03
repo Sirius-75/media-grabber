@@ -2,7 +2,9 @@
  * @vitest-environment jsdom
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { DOWNLOAD_RETRY_STORAGE_KEY } from '../src/shared/download-retry'
 import { DOWNLOAD_STATUS_STORAGE_KEY } from '../src/shared/download-status'
+import { HLS_JOB_STORAGE_KEY } from '../src/shared/hls-job'
 import type { MediaItem } from '../src/shared/types'
 
 /**
@@ -28,6 +30,15 @@ const dash: MediaItem = {
   firstSeen: 2,
 }
 
+const hls: MediaItem = {
+  url: 'https://cdn.example/master.m3u8',
+  kind: 'hls',
+  ext: 'm3u8',
+  sources: ['network'],
+  downloadable: false,
+  firstSeen: 3,
+}
+
 interface StorageListener {
   (
     changes: Record<string, chrome.storage.StorageChange>,
@@ -38,6 +49,7 @@ interface StorageListener {
 let sent: unknown[]
 let downloadResponse: unknown
 let stored: unknown
+let sessionExtra: Record<string, unknown>
 let mediaItems: MediaItem[]
 let storageListeners: StorageListener[]
 
@@ -45,6 +57,7 @@ function installChrome(): void {
   sent = []
   downloadResponse = { ok: false, error: '服务器拒绝访问（403）' }
   stored = undefined
+  sessionExtra = {}
   mediaItems = [video]
   storageListeners = []
   const mock = {
@@ -66,7 +79,7 @@ function installChrome(): void {
     storage: {
       session: {
         async get() {
-          return { [DOWNLOAD_STATUS_STORAGE_KEY]: stored }
+          return { [DOWNLOAD_STATUS_STORAGE_KEY]: stored, ...sessionExtra }
         },
       },
       onChanged: {
@@ -89,6 +102,7 @@ async function openPopup(): Promise<void> {
       <button id="clear" type="button" disabled>清空</button>
     </header>
     <p id="banner" class="banner" hidden></p>
+    <p id="page-title" class="page-title" hidden></p>
     <p id="empty" class="empty" hidden>当前页面还没有发现音视频。播放一下，或刷新后再打开看看。</p>
     <ul id="list" class="list"></ul>
   `
@@ -104,6 +118,13 @@ beforeEach(() => {
 })
 
 describe('popup 下载状态', () => {
+  it('列表上方显示当前页面标题', async () => {
+    await openPopup()
+    const title = document.querySelector('#page-title')
+    expect(title?.hasAttribute('hidden')).toBe(false)
+    expect(title?.textContent).toBe('示例')
+  })
+
   it('重开时显示 session 里的最近失败原因', async () => {
     stored = {
       [video.url]: { phase: 'failed', message: '网络连接失败', updatedAt: 1 },
@@ -111,6 +132,55 @@ describe('popup 下载状态', () => {
     await openPopup()
     expect(document.querySelector('.status')?.textContent).toBe('网络连接失败')
     expect(document.querySelector('.status-failed')).toBeTruthy()
+  })
+
+  it('失败后用同一地址重试，只改这一条并去掉重试按钮', async () => {
+    stored = {
+      [video.url]: { phase: 'failed', message: '网络连接失败', updatedAt: 1 },
+    }
+    await openPopup()
+    const retry = document.querySelector<HTMLButtonElement>('[data-action="retry"]')
+    expect(retry?.textContent).toBe('重试')
+    downloadResponse = { ok: true, downloadId: 12 }
+    retry?.click()
+    await vi.waitFor(() => {
+      expect(document.querySelector('.status')?.textContent).toBe('已开始下载')
+    })
+    expect(sent.at(-1)).toEqual({
+      type: 'DOWNLOAD',
+      url: video.url,
+      tabId: 5,
+    })
+    expect(document.querySelector('[data-action="retry"]')).toBeNull()
+  })
+
+  it('HLS 失败后用记下的清晰度重试，不再重新选一遍', async () => {
+    mediaItems = [hls]
+    const mediaUrl = 'https://cdn.example/high.m3u8'
+    sessionExtra = {
+      [HLS_JOB_STORAGE_KEY]: {
+        [hls.url]: {
+          phase: 'failed',
+          message: '服务器拒绝访问（403）',
+          completed: 0,
+          total: 1,
+          updatedAt: 1,
+        },
+      },
+      [DOWNLOAD_RETRY_STORAGE_KEY]: {
+        [hls.url]: { kind: 'hls', mode: 'download', mediaUrl },
+      },
+    }
+    await openPopup()
+    document.querySelector<HTMLButtonElement>('[data-action="retry"]')?.click()
+    await vi.waitFor(() => {
+      expect(sent).toContainEqual({
+        type: 'HLS_DOWNLOAD',
+        url: hls.url,
+        mediaUrl,
+        tabId: 5,
+      })
+    })
   })
 
   it('点击下载后把回复写在这一条上，随后完成状态也能更新', async () => {
@@ -164,6 +234,7 @@ describe('popup DASH 按钮', () => {
         <button id="clear" type="button" disabled>清空</button>
       </header>
       <p id="banner" class="banner" hidden></p>
+      <p id="page-title" class="page-title" hidden></p>
       <p id="empty" class="empty" hidden>当前页面还没有发现音视频。</p>
       <ul id="list" class="list"></ul>
     `
