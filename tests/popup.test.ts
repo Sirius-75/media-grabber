@@ -801,12 +801,91 @@ describe('B 站分轨按钮（示例数据）', () => {
     expect(downloads).toEqual([video.url])
   })
 
-  it('DASH 清单仍然只有一颗下载', () => {
+  it('DASH 清单和 B 站一样分下载视频和下载音频，只有音频轨时只留音频按钮', () => {
     const list = document.createElement('ul')
+    const calls: string[] = []
+    bindListActions(list, () => [dash], {
+      onCopy: () => undefined,
+      onDownload: () => undefined,
+      onDashDownload(url) {
+        calls.push(`video:${url}`)
+      },
+      onDashAudio(url) {
+        calls.push(`audio:${url}`)
+      },
+    })
+
     renderList(list, [dash])
-    expect([...list.querySelectorAll('button')].map((button) => button.textContent)).toEqual(['复制', '下载'])
-    expect(list.querySelector('[data-action="dash-download"]')?.textContent).toBe('下载')
-    expect(list.querySelector('[data-action="bilibili-with-audio"]')).toBeNull()
+    expect([...list.querySelectorAll('button')].map((button) => button.textContent)).toEqual([
+      '复制',
+      '下载视频',
+      '下载音频',
+    ])
+    list.querySelector<HTMLButtonElement>('[data-action="dash-download"]')?.click()
+    list.querySelector<HTMLButtonElement>('[data-action="dash-audio"]')?.click()
+    expect(calls).toEqual([`video:${dash.url}`, `audio:${dash.url}`])
+
+    renderList(list, [dash], undefined, undefined, undefined, {
+      [dash.url]: {
+        phase: 'complete',
+        message: '已完成',
+        completed: 1,
+        total: 1,
+        updatedAt: 1,
+        hasVideo: false,
+        hasAudio: true,
+      },
+    })
+    expect([...list.querySelectorAll('button')].map((button) => button.textContent)).toEqual(['复制', '下载音频'])
+    expect(list.querySelector('[data-action="dash-download"]')).toBeNull()
+
+    renderList(list, [dash], undefined, undefined, undefined, {
+      [dash.url]: {
+        phase: 'complete',
+        message: '已完成',
+        completed: 1,
+        total: 1,
+        updatedAt: 2,
+        hasVideo: true,
+        hasAudio: false,
+      },
+    })
+    expect([...list.querySelectorAll('button')].map((button) => button.textContent)).toEqual(['复制', '下载视频'])
+    expect(list.querySelector('[data-action="dash-audio"]')).toBeNull()
+    expect(list.querySelector('.note')?.textContent).toContain('没找到音频，下载的视频没有声音')
+  })
+
+  it('DASH 的下载音频也能先选音轨，选择结果记在任务里', () => {
+    const list = document.createElement('ul')
+    const starts: string[] = []
+    bindListActions(list, () => [dash], {
+      onCopy: () => undefined,
+      onDownload: () => undefined,
+      onDashStart(_url, representationId) {
+        starts.push(representationId)
+      },
+    })
+    renderList(list, [dash], undefined, undefined, undefined, {
+      [dash.url]: {
+        phase: 'picking',
+        message: '请选择清晰度',
+        completed: 0,
+        total: 0,
+        updatedAt: 1,
+        audioOnly: true,
+        hasVideo: true,
+        hasAudio: true,
+        variants: [
+          { url: 'audio-main', label: '128 kbps', bandwidth: 128000, separateAudio: false },
+          { url: 'audio-low', label: '64 kbps', bandwidth: 64000, separateAudio: false },
+        ],
+      },
+    })
+    expect(list.querySelector('select')?.value).toBe('audio-main')
+    expect(list.querySelector('[data-action="dash-download"]')).toBeNull()
+    expect(list.querySelector('[data-action="dash-audio"]')).toBeNull()
+    list.querySelector<HTMLButtonElement>('[data-action="dash-start"]')?.click()
+    expect(starts).toEqual(['audio-main'])
   })
 })
 

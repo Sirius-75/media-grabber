@@ -12,7 +12,7 @@ import {
   type DownloadStatusRecord,
 } from '../shared/download-status'
 import { formatBytes } from '../shared/format'
-import { DASH_NOTE } from '../shared/dash-text'
+import { DASH_NO_AUDIO_HINT, DASH_NOTE } from '../shared/dash-text'
 import type { HlsJobMap, HlsJobPhase, HlsJobRecord } from '../shared/hls-job'
 import type { BilibiliRole, MediaItem, MediaKind } from '../shared/types'
 
@@ -260,6 +260,7 @@ export interface ListActions {
   onHlsCancel?: (url: string, button: HTMLButtonElement) => void
   onHlsVariant?: (url: string, mediaUrl: string) => void
   onDashDownload?: (url: string, button: HTMLButtonElement) => void
+  onDashAudio?: (url: string, button: HTMLButtonElement) => void
   onDashStart?: (url: string, mediaUrl: string, button: HTMLButtonElement) => void
   onDashCancel?: (url: string, button: HTMLButtonElement) => void
   onDashVariant?: (url: string, mediaUrl: string) => void
@@ -324,6 +325,7 @@ export function bindListActions(
       actions.onHlsStart?.(item.url, mediaUrl, button)
     }
     if (button.dataset.action === 'dash-download') actions.onDashDownload?.(item.url, button)
+    if (button.dataset.action === 'dash-audio') actions.onDashAudio?.(item.url, button)
     if (button.dataset.action === 'dash-cancel') actions.onDashCancel?.(item.url, button)
     if (button.dataset.action === 'dash-start') {
       const select = row.querySelector('select')
@@ -417,8 +419,14 @@ function renderItem(
       : undefined
   const hls = segment?.job ?? (canOfferBilibiliDownload(item) ? bilibiliJob : undefined)
   // 下载进行中时，进度和失败原因已经说明状态，不再重复清单说明。
-  if (!hls || hls.phase === 'picking') {
-    const note = rowNote(item, pairAudio)
+  // DASH 没有音频轨时，提示要一直留着，下载完成后也还能看到。
+  const dashNoAudio =
+    item.kind === 'dash' &&
+    canOfferDashDownload(item) &&
+    dashJob?.hasVideo !== false &&
+    dashJob?.hasAudio === false
+  if (!hls || hls.phase === 'picking' || dashNoAudio) {
+    const note = rowNote(item, pairAudio, dashJob)
     if (note) {
       const noteEl = document.createElement('p')
       noteEl.className = 'note'
@@ -508,11 +516,13 @@ function renderItem(
       cancel.dataset.action = `${prefix}-cancel`
       cancel.textContent = '取消'
       actions.append(cancel)
+    } else if (segment.action === 'dash') {
+      appendDashButtons(actions, dashJob)
     } else {
       const download = document.createElement('button')
       download.type = 'button'
-      download.className = `${prefix}-download`
-      download.dataset.action = `${prefix}-download`
+      download.className = 'hls-download'
+      download.dataset.action = 'hls-download'
       download.textContent = '下载'
       actions.append(download)
     }
@@ -538,11 +548,35 @@ function renderItem(
 }
 
 /** 视频行在没有可配对音频时，说明里补上没有声音。其它条目用原来的说明。 */
-function rowNote(item: MediaItem, pairAudio: boolean): string | undefined {
+function rowNote(item: MediaItem, pairAudio: boolean, dashJob?: HlsJobRecord): string | undefined {
   const note = itemNote(item)
+  if (
+    item.kind === 'dash' &&
+    canOfferDashDownload(item) &&
+    dashJob?.hasVideo !== false &&
+    dashJob?.hasAudio === false
+  ) {
+    if (note?.includes(DASH_NO_AUDIO_HINT)) return note
+    return note ? `${note} ${DASH_NO_AUDIO_HINT}` : DASH_NO_AUDIO_HINT
+  }
   if (item.bilibili?.role !== 'video' || pairAudio || !canOfferBilibiliDownload(item)) return note
   if (note?.includes(BILIBILI_NO_AUDIO_HINT)) return note
   return note ? `${note} ${BILIBILI_NO_AUDIO_HINT}` : BILIBILI_NO_AUDIO_HINT
+}
+
+/**
+ * DASH 和 B 站一样分「下载视频」「下载音频」。
+ * 清单里只有音频轨时只留音频按钮；没有音频轨时视频按钮仍可用，说明里写没有声音。
+ */
+function appendDashButtons(actions: HTMLElement, dashJob?: HlsJobRecord): void {
+  if (dashJob?.hasVideo !== false) {
+    const video = bilibiliActionButton('dash-download', '下载视频')
+    video.className = 'dash-download'
+    actions.append(video)
+  }
+  if (dashJob?.hasAudio !== false) {
+    actions.append(bilibiliActionButton('dash-audio', '下载音频'))
+  }
 }
 
 function bilibiliActionButton(action: string, text: string): HTMLButtonElement {

@@ -19,6 +19,15 @@ const video: MediaItem = {
   firstSeen: 1,
 }
 
+const dash: MediaItem = {
+  url: 'https://cdn.example/manifest.mpd',
+  kind: 'dash',
+  ext: 'mpd',
+  sources: ['network'],
+  downloadable: false,
+  firstSeen: 2,
+}
+
 interface StorageListener {
   (
     changes: Record<string, chrome.storage.StorageChange>,
@@ -29,12 +38,14 @@ interface StorageListener {
 let sent: unknown[]
 let downloadResponse: unknown
 let stored: unknown
+let mediaItems: MediaItem[]
 let storageListeners: StorageListener[]
 
 function installChrome(): void {
   sent = []
   downloadResponse = { ok: false, error: '服务器拒绝访问（403）' }
   stored = undefined
+  mediaItems = [video]
   storageListeners = []
   const mock = {
     tabs: {
@@ -46,7 +57,7 @@ function installChrome(): void {
       async sendMessage(message: unknown) {
         sent.push(message)
         if (typeof message === 'object' && message !== null && 'type' in message) {
-          if (message.type === 'GET_MEDIA') return [video]
+          if (message.type === 'GET_MEDIA') return mediaItems
           if (message.type === 'DOWNLOAD') return downloadResponse
         }
         return undefined
@@ -141,5 +152,49 @@ describe('popup 下载状态', () => {
     })
     expect(document.querySelector('.status-failed')).toBeTruthy()
     expect(document.querySelector('.download')?.textContent).toBe('服务器拒绝访问（403）')
+  })
+})
+
+describe('popup DASH 按钮', () => {
+  async function openDashPopup(): Promise<void> {
+    mediaItems = [dash]
+    document.body.innerHTML = `
+      <header class="bar">
+        <div class="titles"><h1>Media Grabber</h1><p id="count">正在读取…</p></div>
+        <button id="clear" type="button" disabled>清空</button>
+      </header>
+      <p id="banner" class="banner" hidden></p>
+      <p id="empty" class="empty" hidden>当前页面还没有发现音视频。</p>
+      <ul id="list" class="list"></ul>
+    `
+    vi.resetModules()
+    await import('../src/popup/main.ts')
+    await vi.waitFor(() => expect(document.querySelectorAll('.item')).toHaveLength(1))
+  }
+
+  it('下载音频和下载视频分别发 audioOnly 为 true / false', async () => {
+    await openDashPopup()
+    document.querySelector<HTMLButtonElement>('[data-action="dash-audio"]')?.click()
+    await vi.waitFor(() => {
+      expect(sent).toContainEqual({
+        type: 'DASH_INSPECT',
+        url: dash.url,
+        separate: false,
+        audioOnly: true,
+        tabId: 5,
+      })
+    })
+
+    sent.length = 0
+    document.querySelector<HTMLButtonElement>('[data-action="dash-download"]')?.click()
+    await vi.waitFor(() => {
+      expect(sent).toContainEqual({
+        type: 'DASH_INSPECT',
+        url: dash.url,
+        separate: false,
+        audioOnly: false,
+        tabId: 5,
+      })
+    })
   })
 })

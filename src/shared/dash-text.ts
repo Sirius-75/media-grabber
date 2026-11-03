@@ -4,6 +4,9 @@
 
 export const DASH_NOTE = 'DASH 清单，可下载未加密的点播'
 
+/** 清单里有视频、没有音频时，写在视频条目说明里。 */
+export const DASH_NO_AUDIO_HINT = '没找到音频，下载的视频没有声音'
+
 export const DASH_TEXT = {
   notManifest: '这不是有效的 DASH 清单',
   badUrl: '只支持 http 或 https 清单',
@@ -19,6 +22,8 @@ export const DASH_TEXT = {
   badSegmentUrl: '清单里有不是 http 或 https 的分片地址',
   missingId: '有一条 Representation 缺少 id',
   variantMissing: '清晰度不在这个清单里',
+  noAudioTrack: '清单里没有可下载的音频轨',
+  noVideoTrack: '清单里只有音频轨，请用「下载音频」',
   picking: '请选择清晰度',
   separatePlan: '视频和音频是分开的，默认合并成一个 mp4。勾选「分开保存视频和音频」则各存一份',
   separateChosenPlan: '视频和音频是分开的，将按你的选择保存成两个文件',

@@ -558,11 +558,20 @@ function fileOf(track: DashTrack): DashFilePlan {
 /**
  * 选定一条清晰度，并在有独立音轨时配上带宽最高的那条。
  * representationId 为空且有多条可选时，只返回选项，不开始下。
+ * audioOnly 为 true 时只选音轨；为 false 时只选视频轨（没有视频就拒绝）。
+ * 不传时保持旧行为：优先视频，没有视频才退回音频。
  */
-export function planDashDownload(manifest: DashManifest, representationId?: string): DashDownloadPlan | { ok: false; error: string } {
-  const choices = manifest.videos.length > 0 ? manifest.videos : manifest.audios
+export function planDashDownload(
+  manifest: DashManifest,
+  representationId?: string,
+  audioOnly?: boolean,
+): DashDownloadPlan | { ok: false; error: string } {
+  if (audioOnly === true && manifest.audios.length === 0) return fail(DASH_TEXT.noAudioTrack)
+  if (audioOnly === false && manifest.videos.length === 0) return fail(DASH_TEXT.noVideoTrack)
+  const choices =
+    audioOnly === true ? manifest.audios : manifest.videos.length > 0 ? manifest.videos : manifest.audios
   if (choices.length === 0) return fail(DASH_TEXT.noMedia)
-  const separateAudio = manifest.videos.length > 0 && manifest.audios.length > 0
+  const separateAudio = audioOnly !== true && manifest.videos.length > 0 && manifest.audios.length > 0
   const variants = choices.map((track) => toChoice(track, separateAudio))
   if (!representationId) {
     if (choices.length > 1) {
@@ -596,7 +605,8 @@ export function planDashDownload(manifest: DashManifest, representationId?: stri
   const warning = joinWarnings([
     assessment.warning,
     files.length > 1 ? DASH_TEXT.separatePlan : undefined,
-    manifest.audios.length > 1 && selected.kind === 'video' ? audioChoiceText(manifest.audios) : undefined,
+    selected.kind === 'video' && manifest.audios.length > 1 ? audioChoiceText(manifest.audios) : undefined,
+    selected.kind === 'audio' && manifest.audios.length > 1 ? audioChoiceText(manifest.audios) : undefined,
   ])
   const plan: DashDownloadPlan = {
     ok: true,

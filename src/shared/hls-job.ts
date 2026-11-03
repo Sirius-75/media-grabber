@@ -40,6 +40,12 @@ export interface HlsJobRecord {
   total: number
   warning?: string
   variants?: HlsVariantChoice[]
+  /** DASH 清单里有没有视频轨。只有 DASH 任务会写，用来决定显示哪些按钮。 */
+  hasVideo?: boolean
+  /** DASH 清单里有没有音频轨。 */
+  hasAudio?: boolean
+  /** 这一次 DASH 任务只下载音频。选择清晰度时也要沿用。 */
+  audioOnly?: boolean
   updatedAt: number
   /**
    * 同一次下载的写入序号。这条清单重新开始后会变大。
@@ -123,6 +129,13 @@ function parseJob(value: unknown): HlsJobRecord | undefined {
     if (typeof value.epoch !== 'number' || !Number.isInteger(value.epoch) || value.epoch < 0) return undefined
     record.epoch = value.epoch
   }
+  for (const key of ['hasVideo', 'hasAudio', 'audioOnly'] as const) {
+    const flag = value[key]
+    if (flag !== undefined) {
+      if (typeof flag !== 'boolean') return undefined
+      record[key] = flag
+    }
+  }
   return record
 }
 
@@ -150,6 +163,9 @@ export interface HlsInspectResponseMaster {
   kind: 'master'
   variants: HlsVariantChoice[]
   warning?: string
+  /** DASH 清单里的轨道情况，HLS 不写。 */
+  hasVideo?: boolean
+  hasAudio?: boolean
 }
 
 export interface HlsInspectResponseMedia {
@@ -158,19 +174,38 @@ export interface HlsInspectResponseMedia {
   total: number
   container: 'ts' | 'mp4'
   warning?: string
+  /** DASH 清单里的轨道情况，HLS 不写。 */
+  hasVideo?: boolean
+  hasAudio?: boolean
+}
+
+export interface HlsInspectResponseError {
+  ok: false
+  error: string
+  /** DASH 检查失败时仍带上清单里的轨道情况。 */
+  hasVideo?: boolean
+  hasAudio?: boolean
 }
 
 export type HlsUserResponse =
   | HlsInspectResponseMaster
   | HlsInspectResponseMedia
-  | { ok: false; error: string }
+  | HlsInspectResponseError
   | { ok: true }
 
 export function readHlsUserResponse(value: unknown): HlsUserResponse | undefined {
   if (!isRecord(value) || typeof value.ok !== 'boolean') return undefined
   if (value.ok === false) {
     if (typeof value.error !== 'string' || value.error.trim() === '') return undefined
-    return { ok: false, error: value.error.trim() }
+    const failure: HlsInspectResponseError = { ok: false, error: value.error.trim() }
+    for (const key of ['hasVideo', 'hasAudio'] as const) {
+      const flag = value[key]
+      if (flag !== undefined) {
+        if (typeof flag !== 'boolean') return undefined
+        failure[key] = flag
+      }
+    }
+    return failure
   }
   if (value.kind === 'master') {
     if (!Array.isArray(value.variants)) return undefined
@@ -185,6 +220,13 @@ export function readHlsUserResponse(value: unknown): HlsUserResponse | undefined
       if (typeof value.warning !== 'string' || value.warning.trim() === '') return undefined
       master.warning = value.warning.trim()
     }
+    for (const key of ['hasVideo', 'hasAudio'] as const) {
+      const flag = value[key]
+      if (flag !== undefined) {
+        if (typeof flag !== 'boolean') return undefined
+        master[key] = flag
+      }
+    }
     return master
   }
   if (value.kind === 'media') {
@@ -194,6 +236,13 @@ export function readHlsUserResponse(value: unknown): HlsUserResponse | undefined
     if (value.warning !== undefined) {
       if (typeof value.warning !== 'string' || value.warning.trim() === '') return undefined
       response.warning = value.warning.trim()
+    }
+    for (const key of ['hasVideo', 'hasAudio'] as const) {
+      const flag = value[key]
+      if (flag !== undefined) {
+        if (typeof flag !== 'boolean') return undefined
+        response[key] = flag
+      }
     }
     return response
   }

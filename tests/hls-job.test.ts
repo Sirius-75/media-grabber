@@ -12,11 +12,39 @@ describe('HLS 任务记录', () => {
         bad: { phase: 'nope', message: 'x', completed: 0, total: 0, updatedAt: 3 },
         epoch: { phase: 'downloading', message: '已下载 1/2', completed: 1, total: 2, updatedAt: 5, epoch: 3 },
         badEpoch: { phase: 'downloading', message: '已下载 1/2', completed: 1, total: 2, updatedAt: 6, epoch: -1 },
+        dash: {
+          phase: 'complete',
+          message: '已完成',
+          completed: 1,
+          total: 1,
+          updatedAt: 7,
+          hasVideo: false,
+          hasAudio: true,
+          audioOnly: true,
+        },
+        badFlag: {
+          phase: 'complete',
+          message: '已完成',
+          completed: 1,
+          total: 1,
+          updatedAt: 8,
+          hasVideo: 'yes',
+        },
       }),
     ).toEqual({
       good: { phase: 'downloading', message: '已下载 1/4', completed: 1, total: 4, updatedAt: 2 },
       remux: { phase: 'remuxing', message: '正在转成 mp4…', completed: 4, total: 4, updatedAt: 4 },
       epoch: { phase: 'downloading', message: '已下载 1/2', completed: 1, total: 2, updatedAt: 5, epoch: 3 },
+      dash: {
+        phase: 'complete',
+        message: '已完成',
+        completed: 1,
+        total: 1,
+        updatedAt: 7,
+        hasVideo: false,
+        hasAudio: true,
+        audioOnly: true,
+      },
     })
   })
 
@@ -43,5 +71,9 @@ describe('HLS 任务记录', () => {
     })
     expect(readHlsUserResponse({ ok: true })).toEqual({ ok: true })
     expect(readHlsUserResponse({ ok: false })).toBeUndefined()
+    expect(
+      readHlsUserResponse({ ok: false, error: '清单里只有音频轨', hasVideo: false, hasAudio: true }),
+    ).toEqual({ ok: false, error: '清单里只有音频轨', hasVideo: false, hasAudio: true })
+    expect(readHlsUserResponse({ ok: false, error: 'x', hasVideo: 'yes' })).toBeUndefined()
   })
 })

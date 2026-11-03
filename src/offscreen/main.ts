@@ -644,9 +644,16 @@ function cancelDash(playlistUrl: string): { ok: true } {
 
 function readDashRequest(
   value: Record<string, unknown>,
-): { playlistUrl: string; representationId?: string; title?: string; index?: number; separate?: boolean } | undefined {
+): { playlistUrl: string; representationId?: string; title?: string; index?: number; separate?: boolean; audioOnly?: boolean } | undefined {
   if (typeof value.playlistUrl !== 'string' || value.playlistUrl.trim() === '') return undefined
-  const request: { playlistUrl: string; representationId?: string; title?: string; index?: number; separate?: boolean } = {
+  const request: {
+    playlistUrl: string
+    representationId?: string
+    title?: string
+    index?: number
+    separate?: boolean
+    audioOnly?: boolean
+  } = {
     playlistUrl: value.playlistUrl.trim(),
   }
   if (typeof value.representationId === 'string' && value.representationId.trim()) {
@@ -655,6 +662,7 @@ function readDashRequest(
   if (typeof value.title === 'string' && value.title.trim()) request.title = value.title
   if (typeof value.index === 'number' && Number.isInteger(value.index) && value.index >= 1) request.index = value.index
   if (value.separate === true) request.separate = true
+  if (value.audioOnly === true) request.audioOnly = true
   return request
 }
 
@@ -691,7 +699,12 @@ export function startOffscreen(): void {
         sendResponse({ ok: false, error: HLS_TEXT.badPlaylistUrl })
         return undefined
       }
-      void inspectDash(message.playlistUrl.trim(), dashHost, message.separate === true).then(sendResponse, (error: unknown) => {
+      void inspectDash(
+        message.playlistUrl.trim(),
+        dashHost,
+        message.separate === true,
+        message.audioOnly === true,
+      ).then(sendResponse, (error: unknown) => {
         warn('检查 DASH 清单失败', error)
         sendResponse({ ok: false, error: inspectFailureMessage(error) })
       })

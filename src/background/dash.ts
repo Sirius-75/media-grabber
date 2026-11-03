@@ -36,12 +36,14 @@ async function forwardDownload(
   representationId: string | undefined,
   tabId: number | undefined,
   separate: boolean,
+  audioOnly: boolean,
 ): Promise<unknown> {
   const context = await downloadContext(tabId, playlistUrl)
   const message: Record<string, unknown> = {
     type: 'DASH_OFFSCREEN_DOWNLOAD',
     playlistUrl,
     separate,
+    audioOnly,
   }
   if (representationId) message.representationId = representationId
   if (context.title) message.title = context.title
@@ -58,7 +60,11 @@ async function inspect(message: DashInspectMessage): Promise<unknown> {
     warn('打开 offscreen 失败', error)
     return { ok: false, error: HLS_TEXT.offscreen }
   }
-  const inspected = await sendOffscreen({ type: 'DASH_OFFSCREEN_INSPECT', playlistUrl })
+  const inspected = await sendOffscreen({
+    type: 'DASH_OFFSCREEN_INSPECT',
+    playlistUrl,
+    audioOnly: message.audioOnly === true,
+  })
   if (inspected === undefined) return { ok: false, error: HLS_TEXT.offscreen }
   if (
     typeof inspected === 'object' &&
@@ -68,7 +74,13 @@ async function inspect(message: DashInspectMessage): Promise<unknown> {
     'ok' in inspected &&
     inspected.ok === true
   ) {
-    const started = await forwardDownload(playlistUrl, undefined, message.tabId, message.separate === true)
+    const started = await forwardDownload(
+      playlistUrl,
+      undefined,
+      message.tabId,
+      message.separate === true,
+      message.audioOnly === true,
+    )
     if (started === undefined) return { ok: false, error: HLS_TEXT.offscreen }
     if (isFailure(started)) return started
   }
@@ -85,7 +97,13 @@ async function download(message: DashDownloadMessage): Promise<unknown> {
     warn('打开 offscreen 失败', error)
     return { ok: false, error: HLS_TEXT.offscreen }
   }
-  const started = await forwardDownload(playlistUrl, representationId, message.tabId, message.separate === true)
+  const started = await forwardDownload(
+    playlistUrl,
+    representationId,
+    message.tabId,
+    message.separate === true,
+    message.audioOnly === true,
+  )
   return started ?? { ok: false, error: HLS_TEXT.offscreen }
 }
 

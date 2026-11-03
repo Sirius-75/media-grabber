@@ -103,6 +103,8 @@ export interface DashInspectMessage {
   tabId?: number
   /** 勾选「分开保存视频和音频」时为 true。缺省表示合并。 */
   separate?: boolean
+  /** 只检查并选择音频轨。缺省表示视频（带声音）。 */
+  audioOnly?: boolean
 }
 
 /** popup → background。representationId 是 Representation 的 id，不是分片地址。 */
@@ -113,6 +115,8 @@ export interface DashDownloadMessage {
   tabId?: number
   /** 勾选「分开保存视频和音频」时为 true。缺省表示合并。 */
   separate?: boolean
+  /** 只下载音频轨。为 true 时 representationId 必须是音频轨的 id。 */
+  audioOnly?: boolean
 }
 
 export interface DashCancelMessage {
@@ -259,6 +263,7 @@ export function isDashInspectMessage(value: unknown): value is DashInspectMessag
   if (!isHttpishUrl(value.url)) return false
   if (value.tabId !== undefined && !isTabId(value.tabId)) return false
   if (value.separate !== undefined && typeof value.separate !== 'boolean') return false
+  if (value.audioOnly !== undefined && typeof value.audioOnly !== 'boolean') return false
   return true
 }
 
@@ -267,6 +272,7 @@ export function isDashDownloadMessage(value: unknown): value is DashDownloadMess
   if (!isHttpishUrl(value.url) || !isHttpishUrl(value.representationId)) return false
   if (value.tabId !== undefined && !isTabId(value.tabId)) return false
   if (value.separate !== undefined && typeof value.separate !== 'boolean') return false
+  if (value.audioOnly !== undefined && typeof value.audioOnly !== 'boolean') return false
   return true
 }
 

@@ -224,16 +224,35 @@ describe('DASH 消息', () => {
     )
     expect(isDashInspectMessage({ type: MESSAGE_TYPE.DASH_INSPECT, url: '  ' })).toBe(false)
     expect(
+      isDashInspectMessage({
+        type: MESSAGE_TYPE.DASH_INSPECT,
+        url: 'https://cdn.example/a.mpd',
+        audioOnly: true,
+      }),
+    ).toBe(true)
+    expect(
+      isDashInspectMessage({
+        type: MESSAGE_TYPE.DASH_INSPECT,
+        url: 'https://cdn.example/a.mpd',
+        audioOnly: 'yes',
+      }),
+    ).toBe(false)
+    expect(
       isDashDownloadMessage({
         type: MESSAGE_TYPE.DASH_DOWNLOAD,
         url: 'https://cdn.example/a.mpd',
-        representationId: 'video-1080',
+        representationId: 'audio-main',
+        audioOnly: true,
       }),
     ).toBe(true)
-    expect(isDashDownloadMessage({ type: MESSAGE_TYPE.DASH_DOWNLOAD, url: 'https://cdn.example/a.mpd' })).toBe(false)
-    expect(isDashDownloadMessage({ type: MESSAGE_TYPE.DASH_DOWNLOAD, url: 'https://cdn.example/a.mpd', representationId: '  ' })).toBe(
-      false,
-    )
+    expect(
+      isDashDownloadMessage({
+        type: MESSAGE_TYPE.DASH_DOWNLOAD,
+        url: 'https://cdn.example/a.mpd',
+        representationId: 'audio-main',
+        audioOnly: 1,
+      }),
+    ).toBe(false)
     expect(
       isDashDownloadMessage({
         type: MESSAGE_TYPE.DASH_DOWNLOAD,

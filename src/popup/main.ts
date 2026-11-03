@@ -188,6 +188,7 @@ function sameJobs(left: HlsJobMap, right: HlsJobMap): boolean {
     if (!a || !b) return false
     if (a.phase !== b.phase || a.message !== b.message || a.completed !== b.completed) return false
     if (a.total !== b.total || a.warning !== b.warning) return false
+    if (a.hasVideo !== b.hasVideo || a.hasAudio !== b.hasAudio || a.audioOnly !== b.audioOnly) return false
     const leftVariants = a.variants ?? []
     const rightVariants = b.variants ?? []
     if (leftVariants.length !== rightVariants.length) return false
@@ -338,10 +339,24 @@ function rememberDash(url: string, record: Omit<HlsJobRecord, 'updatedAt'>): voi
   }
 }
 
-async function requestDashDownload(url: string): Promise<void> {
-  rememberDash(url, { phase: 'inspecting', message: HLS_TEXT.inspecting, completed: 0, total: 0 })
+async function requestDashDownload(url: string, audioOnly: boolean): Promise<void> {
+  const previous = dashJobs[statusKey(url)]
+  rememberDash(url, {
+    phase: 'inspecting',
+    message: HLS_TEXT.inspecting,
+    completed: 0,
+    total: 0,
+    audioOnly,
+    hasVideo: previous?.hasVideo,
+    hasAudio: previous?.hasAudio,
+  })
   paint()
-  const message: DashInspectMessage = { type: MESSAGE_TYPE.DASH_INSPECT, url, separate: wantsSeparate() }
+  const message: DashInspectMessage = {
+    type: MESSAGE_TYPE.DASH_INSPECT,
+    url,
+    separate: audioOnly ? false : wantsSeparate(),
+    audioOnly,
+  }
   if (tabId !== undefined) message.tabId = tabId
   try {
     const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))
@@ -351,6 +366,9 @@ async function requestDashDownload(url: string): Promise<void> {
         message: response && response.ok === false ? response.error : '读取清单失败',
         completed: 0,
         total: 0,
+        audioOnly,
+        hasVideo: response && response.ok === false ? response.hasVideo : previous?.hasVideo,
+        hasAudio: response && response.ok === false ? response.hasAudio : previous?.hasAudio,
       })
       paint()
       return
@@ -363,6 +381,9 @@ async function requestDashDownload(url: string): Promise<void> {
         total: 0,
         variants: response.variants,
         warning: response.warning,
+        audioOnly,
+        hasVideo: response.hasVideo ?? previous?.hasVideo,
+        hasAudio: response.hasAudio ?? previous?.hasAudio,
       })
       paint()
       return
@@ -374,39 +395,85 @@ async function requestDashDownload(url: string): Promise<void> {
         completed: 0,
         total: response.total,
         warning: response.warning,
+        audioOnly,
+        hasVideo: response.hasVideo ?? previous?.hasVideo,
+        hasAudio: response.hasAudio ?? previous?.hasAudio,
       })
       paint()
       return
     }
-    rememberDash(url, { phase: 'failed', message: '读取清单失败', completed: 0, total: 0 })
+    if (response.ok === true) {
+      rememberDash(url, {
+        phase: 'downloading',
+        message: HLS_TEXT.started,
+        completed: 0,
+        total: 0,
+        audioOnly,
+        hasVideo: previous?.hasVideo,
+        hasAudio: previous?.hasAudio,
+      })
+      paint()
+      return
+    }
+    rememberDash(url, {
+      phase: 'failed',
+      message: '读取清单失败',
+      completed: 0,
+      total: 0,
+      audioOnly,
+      hasVideo: previous?.hasVideo,
+      hasAudio: previous?.hasAudio,
+    })
     paint()
   } catch {
-    rememberDash(url, { phase: 'failed', message: '读取清单失败', completed: 0, total: 0 })
+    rememberDash(url, {
+      phase: 'failed',
+      message: '读取清单失败',
+      completed: 0,
+      total: 0,
+      audioOnly,
+      hasVideo: previous?.hasVideo,
+      hasAudio: previous?.hasAudio,
+    })
     paint()
   }
 }
 
 async function startDashDownload(url: string, representationId: string): Promise<void> {
   if (!representationId) {
-    rememberDash(url, { phase: 'failed', message: HLS_TEXT.noVariants, completed: 0, total: 0 })
+    const previous = dashJobs[statusKey(url)]
+    rememberDash(url, {
+      phase: 'failed',
+      message: HLS_TEXT.noVariants,
+      completed: 0,
+      total: 0,
+      audioOnly: previous?.audioOnly,
+      hasVideo: previous?.hasVideo,
+      hasAudio: previous?.hasAudio,
+    })
     paint()
     return
   }
   preferredVariant.set(url, representationId)
   const previous = dashJobs[statusKey(url)]
+  const audioOnly = previous?.audioOnly === true
   rememberDash(url, {
     phase: 'downloading',
     message: HLS_TEXT.started,
     completed: 0,
     total: 0,
     warning: previous?.warning,
+    audioOnly,
+    hasVideo: previous?.hasVideo,
+    hasAudio: previous?.hasAudio,
   })
   paint()
   const message: DashDownloadMessage = {
     type: MESSAGE_TYPE.DASH_DOWNLOAD,
     url,
     representationId,
-    separate: wantsSeparate(),
+    separate: audioOnly ? false : wantsSeparate(),
+    audioOnly,
   }
   if (tabId !== undefined) message.tabId = tabId
   try {
@@ -417,11 +484,22 @@ async function startDashDownload(url: string, representationId: string): Promise
         message: response && response.ok === false ? response.error : HLS_TEXT.offscreen,
         completed: 0,
         total: 0,
+        audioOnly,
+        hasVideo: previous?.hasVideo,
+        hasAudio: previous?.hasAudio,
       })
       paint()
     }
   } catch {
-    rememberDash(url, { phase: 'failed', message: HLS_TEXT.offscreen, completed: 0, total: 0 })
+    rememberDash(url, {
+      phase: 'failed',
+      message: HLS_TEXT.offscreen,
+      completed: 0,
+      total: 0,
+      audioOnly,
+      hasVideo: previous?.hasVideo,
+      hasAudio: previous?.hasAudio,
+    })
     paint()
   }
 }
@@ -613,7 +691,10 @@ function start(): void {
       preferredVariant.set(url, mediaUrl)
     },
     onDashDownload(url) {
-      void requestDashDownload(url)
+      void requestDashDownload(url, false)
+    },
+    onDashAudio(url) {
+      void requestDashDownload(url, true)
     },
     onDashStart(url, representationId) {
       void startDashDownload(url, representationId)

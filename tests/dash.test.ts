@@ -221,4 +221,69 @@ describe('解析 MPD', () => {
     if (!parsed.ok) return
     expect(planDashDownload(parsed, 'missing')).toEqual({ ok: false, error: DASH_TEXT.variantMissing })
   })
+
+  it('audioOnly 只选音轨，没有音轨或只有音轨时给出中文原因', () => {
+    const parsed = parseMpd(
+      mpd(`
+        <Period>
+          <AdaptationSet mimeType="video/mp4">
+            <SegmentTemplate timescale="1" duration="2" initialization="v-init.mp4" media="v-$Number$.m4s"/>
+            <Representation id="video-high" bandwidth="2000000" width="1280" height="720"/>
+          </AdaptationSet>
+          <AdaptationSet mimeType="audio/mp4">
+            <SegmentTemplate timescale="1" duration="2" initialization="a-init.mp4" media="a-$Number$.m4s"/>
+            <Representation id="audio-main" bandwidth="128000">
+              <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
+            </Representation>
+            <Representation id="audio-low" bandwidth="64000"/>
+          </AdaptationSet>
+        </Period>
+      `),
+      MANIFEST,
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+
+    const pending = planDashDownload(parsed, undefined, true)
+    expect(pending.ok).toBe(true)
+    if (!pending.ok) return
+    expect(pending.files).toEqual([])
+    expect(pending.variants.map((variant) => variant.url)).toEqual(['audio-main', 'audio-low'])
+    expect(pending.variants.every((variant) => variant.separateAudio === false)).toBe(true)
+
+    const audio = planDashDownload(parsed, 'audio-main', true)
+    expect(audio.ok).toBe(true)
+    if (!audio.ok) return
+    expect(audio.files).toHaveLength(1)
+    expect(audio.files[0]).toMatchObject({ kind: 'audio', ext: 'm4a' })
+    expect(audio.urls).toEqual([
+      'https://origin.example/dash/a-init.mp4',
+      'https://origin.example/dash/a-1.m4s',
+      'https://origin.example/dash/a-2.m4s',
+    ])
+    expect(audio.separateAudio).toBe(false)
+
+    const audioOnlyManifest = parseMpd(
+      mpd(`<Period><AdaptationSet mimeType="audio/mp4"><SegmentTemplate initialization="i.mp4" media="$Number$.m4s" duration="4" timescale="1"/><Representation id="a" bandwidth="96000"/></AdaptationSet></Period>`),
+      MANIFEST,
+    )
+    expect(audioOnlyManifest.ok).toBe(true)
+    if (!audioOnlyManifest.ok) return
+    expect(planDashDownload(audioOnlyManifest, undefined, false)).toEqual({
+      ok: false,
+      error: DASH_TEXT.noVideoTrack,
+    })
+    expect(planDashDownload(audioOnlyManifest, undefined, true).ok).toBe(true)
+
+    const videoOnlyManifest = parseMpd(
+      mpd(`<Period><AdaptationSet mimeType="video/mp4"><SegmentTemplate initialization="i.mp4" media="$Number$.m4s" duration="4" timescale="1"/><Representation id="v" bandwidth="1000" width="640" height="360"/></AdaptationSet></Period>`),
+      MANIFEST,
+    )
+    expect(videoOnlyManifest.ok).toBe(true)
+    if (!videoOnlyManifest.ok) return
+    expect(planDashDownload(videoOnlyManifest, undefined, true)).toEqual({
+      ok: false,
+      error: DASH_TEXT.noAudioTrack,
+    })
+  })
 })
