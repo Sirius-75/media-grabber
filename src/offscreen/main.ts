@@ -30,6 +30,7 @@ import {
 import { BILIBILI_JOB_STORAGE_KEY, BILIBILI_OFFSCREEN, BILIBILI_PORT } from '../shared/bilibili'
 import type { BilibiliDownloadFile } from '../shared/bilibili'
 import { DASH_JOB_STORAGE_KEY } from '../shared/dash-job'
+import { MAX_CONCURRENT_JOBS } from '../shared/download-queue'
 import { HLS_JOB_STORAGE_KEY, toVariantChoice, type HlsJobRecord } from '../shared/hls-job'
 import type { BilibiliRole } from '../shared/types'
 import { abortDashInspect, inspectDash, startDashDownload, type DashHost } from './dash-task'
@@ -54,7 +55,7 @@ interface ActiveDownload {
   epoch: number
 }
 
-let active: ActiveDownload | undefined
+const activeJobs = new Map<string, ActiveDownload>()
 let inspecting: { key: string; controller: AbortController } | undefined
 let writeQueue: Promise<void> = Promise.resolve()
 let epochCounter = 0
@@ -78,7 +79,23 @@ function enqueue(task: () => Promise<void>): Promise<void> {
 
 function activate(key: string, controller: AbortController): void {
   epochCounter += 1
-  active = { key, controller, epoch: epochCounter }
+  activeJobs.set(key, { key, controller, epoch: epochCounter })
+}
+
+function activeFor(controller: AbortController): ActiveDownload | undefined {
+  for (const job of activeJobs.values()) {
+    if (job.controller === controller) return job
+  }
+  return undefined
+}
+
+function isCurrent(controller: AbortController): boolean {
+  return activeFor(controller) !== undefined
+}
+
+function clearActive(controller: AbortController): void {
+  const job = activeFor(controller)
+  if (job) activeJobs.delete(job.key)
 }
 
 function writeJob(
@@ -89,8 +106,9 @@ function writeJob(
 ): Promise<void> {
   return enqueue(async () => {
     // 同一个清单被重新开始之后，旧任务晚到的进度不能把新任务盖掉。
-    if (controller && active?.controller !== controller) return
-    const next = controller && active ? { ...record, epoch: active.epoch } : record
+    const current = controller ? activeFor(controller) : undefined
+    if (controller && !current) return
+    const next = controller && current ? { ...record, epoch: current.epoch } : record
     await putJob(storageKey, key, next)
   })
 }
@@ -121,7 +139,7 @@ function job(input: Omit<HlsJobRecord, 'updatedAt' | 'epoch'>): HlsJobRecord {
 }
 
 function stillCurrent(controller: AbortController): boolean {
-  return active?.controller === controller
+  return isCurrent(controller)
 }
 
 async function loadPlaylist(url: string, signal: AbortSignal): Promise<HlsPlaylist> {
@@ -131,7 +149,7 @@ async function loadPlaylist(url: string, signal: AbortSignal): Promise<HlsPlayli
 }
 
 async function inspect(playlistUrl: string): Promise<unknown> {
-  if (active?.key === playlistUrl) return { ok: false, error: HLS_TEXT.busy }
+  if (activeJobs.has(playlistUrl)) return { ok: false, error: HLS_TEXT.busy }
   inspecting?.controller.abort()
   const controller = new AbortController()
   inspecting = { key: playlistUrl, controller }
@@ -208,8 +226,9 @@ function readDownload(value: Record<string, unknown>): DownloadRequest | undefin
 }
 
 function acceptDownload(request: DownloadRequest): { ok: true } | { ok: false; error: string } {
-  if (active && active.key !== request.playlistUrl) return { ok: false, error: HLS_TEXT.busy }
-  if (active?.key === request.playlistUrl) active.controller.abort()
+  const existing = activeJobs.get(request.playlistUrl)
+  if (existing) existing.controller.abort()
+  if (activeJobs.size >= MAX_CONCURRENT_JOBS && !existing) return { ok: false, error: HLS_TEXT.busy }
   const controller = new AbortController()
   // 先占住，避免同步检查把正在开始的任务当成已经中断。
   activate(request.playlistUrl, controller)
@@ -470,7 +489,7 @@ async function runDownload(request: DownloadRequest, controller: AbortController
     const message = describeInterruptReason(error instanceof Error ? error.message : undefined)
     await settleJob(() => failJob(key, controller, message))
   } finally {
-    if (active?.controller === controller) active = undefined
+    clearActive(controller)
   }
 }
 
@@ -535,10 +554,10 @@ function ensureBilibiliPort(): void {
 
 const bilibiliHost: BilibiliHost = {
   still(controller) {
-    return active?.controller === controller
+    return isCurrent(controller)
   },
   clear(controller) {
-    if (active?.controller === controller) active = undefined
+    clearActive(controller)
   },
   write(key, record, controller) {
     return writeJob(key, record, controller, BILIBILI_JOB_STORAGE_KEY)
@@ -552,28 +571,32 @@ function startBilibiliDownload(request: {
   index?: number
   separate?: boolean
 }): { ok: true } | { ok: false; error: string } {
-  if (active && active.key !== request.key) return { ok: false, error: HLS_TEXT.busy }
-  if (active?.key === request.key) active.controller.abort()
+  const existing = activeJobs.get(request.key)
+  if (existing) existing.controller.abort()
+  if (activeJobs.size >= MAX_CONCURRENT_JOBS && !existing) return { ok: false, error: HLS_TEXT.busy }
   const controller = new AbortController()
   activate(request.key, controller)
   ensureBilibiliPort()
   void runBilibiliDownload(request, controller, bilibiliHost)
     .then((result) => {
       // 同一条又开始了新的下载时，旧任务的结束不能把新任务报成完成。
-      if (active && active.controller !== controller) return undefined
+      const current = activeJobs.get(request.key)
+      if (current && current.controller !== controller) return undefined
       return reportBilibili(request.key, result)
     })
     .catch((error: unknown) => {
       warn('B站下载任务异常', error)
-      if (active && active.controller !== controller) return undefined
+      const current = activeJobs.get(request.key)
+      if (current && current.controller !== controller) return undefined
       return reportBilibili(request.key, { ok: false, error: HLS_TEXT.offscreen })
     })
   return { ok: true }
 }
 
 function cancelBilibili(key: string): { ok: true } {
-  if (active?.key === key) {
-    active.controller.abort()
+  const current = activeJobs.get(key)
+  if (current) {
+    current.controller.abort()
     return { ok: true }
   }
   void enqueue(async () => {
@@ -588,22 +611,23 @@ function cancelBilibili(key: string): { ok: true } {
 
 const dashHost: DashHost = {
   isActive(key) {
-    return active?.key === key
+    return activeJobs.has(key)
   },
   busyOther(key) {
-    return active && active.key !== key ? HLS_TEXT.busy : undefined
+    if (activeJobs.has(key)) return undefined
+    return activeJobs.size >= MAX_CONCURRENT_JOBS ? HLS_TEXT.busy : undefined
   },
   abortSame(key) {
-    if (active?.key === key) active.controller.abort()
+    activeJobs.get(key)?.controller.abort()
   },
   setActive(key, controller) {
     activate(key, controller)
   },
   still(controller) {
-    return active?.controller === controller
+    return isCurrent(controller)
   },
   clear(controller) {
-    if (active?.controller === controller) active = undefined
+    clearActive(controller)
   },
   write(key, record, controller) {
     return writeJob(key, record, controller, DASH_JOB_STORAGE_KEY)
@@ -611,8 +635,9 @@ const dashHost: DashHost = {
 }
 
 function cancelJob(playlistUrl: string): { ok: true } {
-  if (active?.key === playlistUrl) {
-    active.controller.abort()
+  const current = activeJobs.get(playlistUrl)
+  if (current) {
+    current.controller.abort()
     return { ok: true }
   }
   if (inspecting?.key === playlistUrl) inspecting.controller.abort()
@@ -628,8 +653,9 @@ function cancelJob(playlistUrl: string): { ok: true } {
 
 function cancelDash(playlistUrl: string): { ok: true } {
   abortDashInspect(playlistUrl)
-  if (active?.key === playlistUrl) {
-    active.controller.abort()
+  const current = activeJobs.get(playlistUrl)
+  if (current) {
+    current.controller.abort()
     return { ok: true }
   }
   void enqueue(async () => {
@@ -739,8 +765,12 @@ export function startOffscreen(): void {
       return undefined
     }
     if (message.type === 'DASH_OFFSCREEN_SYNC' || message.type === 'HLS_OFFSCREEN_SYNC') {
-      const response: { ok: true; activeKey?: string } = { ok: true }
-      if (active?.key) response.activeKey = active.key
+      const response: { ok: true; activeKey?: string; activeKeys: string[] } = {
+        ok: true,
+        activeKeys: [...activeJobs.keys()],
+      }
+      const first = activeJobs.keys().next()
+      if (!first.done) response.activeKey = first.value
       sendResponse(response)
       return undefined
     }

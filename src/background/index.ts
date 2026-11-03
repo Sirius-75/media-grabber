@@ -13,12 +13,14 @@ import { listenForDash } from './dash'
 import { listenForDownload } from './download'
 import { listenForHls } from './hls'
 import { listenForOffscreenJobs } from './offscreen-jobs'
+import { initDownloadQueue } from './queue'
 import { addMedia, fillMediaSize, initStore } from './store'
 import { startSniffer } from './sniffer'
 
 initStore()
 listenForDownload()
 listenForOffscreenJobs()
+initDownloadQueue()
 listenForHls()
 listenForDash()
 listenForBilibili()

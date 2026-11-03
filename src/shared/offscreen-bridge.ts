@@ -76,3 +76,18 @@ export function readOffscreenActiveKey(value: unknown): string | undefined {
   if (typeof value.activeKey !== 'string' || value.activeKey.trim() === '') return undefined
   return value.activeKey
 }
+
+/** offscreen 可能同时跑两条任务。同步时把还活着的 key 都带回来。 */
+export function readOffscreenActiveKeys(value: unknown): string[] {
+  if (!isRecord(value)) return []
+  const keys: string[] = []
+  if (Array.isArray(value.activeKeys)) {
+    for (const entry of value.activeKeys) {
+      if (typeof entry === 'string' && entry.trim() !== '' && !keys.includes(entry.trim())) keys.push(entry.trim())
+    }
+  }
+  // 兼容只带 activeKey 的旧回复。
+  const single = readOffscreenActiveKey(value)
+  if (single && !keys.includes(single)) keys.push(single)
+  return keys
+}

@@ -10,6 +10,14 @@ import { BILIBILI_JOB_STORAGE_KEY, BILIBILI_TEXT } from '../shared/bilibili'
 import { normalizeUrl } from '../shared/classify'
 import { DASH_JOB_STORAGE_KEY, readDashJobMap } from '../shared/dash-job'
 import {
+  JOB_QUEUE_STORAGE_KEY,
+  emptyQueue,
+  queuePosition,
+  queuedStatusText,
+  readDownloadQueue,
+  type DownloadQueueState,
+} from '../shared/download-queue'
+import {
   DOWNLOAD_STATUS_STORAGE_KEY,
   readDownloadStatusMap,
   type DownloadStatusMap,
@@ -55,6 +63,7 @@ let statuses: DownloadStatusMap = {}
 let jobs: HlsJobMap = {}
 let dashJobs: HlsJobMap = {}
 let bilibiliJobs: HlsJobMap = {}
+let queue: DownloadQueueState = emptyQueue()
 /** 用户在清晰度列表里点过的地址。DASH 里存的是 Representation id。重画时不要跳回默认项。 */
 const preferredVariant = new Map<string, string>()
 
@@ -83,7 +92,7 @@ function paint(): void {
 
   countEl.textContent = `共 ${items.length} 条`
   clearButton.disabled = tabId === undefined || items.length === 0
-  renderList(listEl, items, statuses, jobs, preferredVariant, dashJobs, bilibiliJobs)
+  renderList(listEl, items, statuses, jobs, preferredVariant, dashJobs, bilibiliJobs, queue)
   const isEmpty = items.length === 0
   emptyEl.hidden = !isEmpty
   listEl.hidden = isEmpty
@@ -133,6 +142,13 @@ function statusKey(url: string): string {
   return normalizeUrl(url) || url
 }
 
+/** 这条地址是否还在队列里等。返回从 1 开始的位置。 */
+function waitingPosition(url: string): number | undefined {
+  const key = statusKey(url)
+  const job = queue.waiting.find((entry) => entry.key === url || entry.key === key)
+  return job ? queuePosition(queue, job.id) : undefined
+}
+
 /** 只比用户能看到的内容。session 回写的时间戳不同，不必整表重画。 */
 function sameStatuses(left: DownloadStatusMap, right: DownloadStatusMap): boolean {
   const leftKeys = Object.keys(left)
@@ -164,11 +180,13 @@ async function readSession(): Promise<void> {
     HLS_JOB_STORAGE_KEY,
     DASH_JOB_STORAGE_KEY,
     BILIBILI_JOB_STORAGE_KEY,
+    JOB_QUEUE_STORAGE_KEY,
   ])
   statuses = readDownloadStatusMap(stored[DOWNLOAD_STATUS_STORAGE_KEY])
   jobs = readHlsJobMap(stored[HLS_JOB_STORAGE_KEY])
   dashJobs = readDashJobMap(stored[DASH_JOB_STORAGE_KEY])
   bilibiliJobs = readHlsJobMap(stored[BILIBILI_JOB_STORAGE_KEY])
+  queue = readDownloadQueue(stored[JOB_QUEUE_STORAGE_KEY])
 }
 
 function rememberJob(url: string, record: Omit<HlsJobRecord, 'updatedAt'>): void {
@@ -176,6 +194,13 @@ function rememberJob(url: string, record: Omit<HlsJobRecord, 'updatedAt'>): void
     ...jobs,
     [statusKey(url)]: { ...record, updatedAt: Date.now() },
   }
+}
+
+function sameQueue(left: DownloadQueueState, right: DownloadQueueState): boolean {
+  if (left.running.length !== right.running.length || left.waiting.length !== right.waiting.length) return false
+  const same = (a: readonly { id: string }[], b: readonly { id: string }[]): boolean =>
+    a.every((job, index) => job.id === b[index]?.id)
+  return same(left.running, right.running) && same(left.waiting, right.waiting)
 }
 
 function sameJobs(left: HlsJobMap, right: HlsJobMap): boolean {
@@ -205,6 +230,7 @@ function onStorageChanged(
   let nextJobs = jobs
   let nextDash = dashJobs
   let nextBilibili = bilibiliJobs
+  let nextQueue = queue
   let changed = false
   if (DOWNLOAD_STATUS_STORAGE_KEY in changes) {
     const parsed = readDownloadStatusMap(changes[DOWNLOAD_STATUS_STORAGE_KEY]?.newValue)
@@ -234,11 +260,19 @@ function onStorageChanged(
       changed = true
     }
   }
+  if (JOB_QUEUE_STORAGE_KEY in changes) {
+    const parsed = readDownloadQueue(changes[JOB_QUEUE_STORAGE_KEY]?.newValue)
+    if (!sameQueue(queue, parsed)) {
+      nextQueue = parsed
+      changed = true
+    }
+  }
   if (!changed) return
   statuses = nextStatuses
   jobs = nextJobs
   dashJobs = nextDash
   bilibiliJobs = nextBilibili
+  queue = nextQueue
   paint()
 }
 
@@ -286,9 +320,12 @@ async function requestHlsDownload(url: string): Promise<void> {
       return
     }
     if ('kind' in response && response.kind === 'media') {
+      // 后台可能已经把这条放进队列，storage 里才是真正的排队位置。
+      await readSession()
+      const position = waitingPosition(url)
       rememberJob(url, {
-        phase: 'downloading',
-        message: HLS_TEXT.started,
+        phase: position === undefined ? 'downloading' : 'queued',
+        message: position === undefined ? HLS_TEXT.started : queuedStatusText(position),
         completed: 0,
         total: response.total,
         warning: response.warning,
@@ -389,9 +426,11 @@ async function requestDashDownload(url: string, audioOnly: boolean): Promise<voi
       return
     }
     if ('kind' in response && response.kind === 'media') {
+      await readSession()
+      const position = waitingPosition(url)
       rememberDash(url, {
-        phase: 'downloading',
-        message: HLS_TEXT.started,
+        phase: position === undefined ? 'downloading' : 'queued',
+        message: position === undefined ? HLS_TEXT.started : queuedStatusText(position),
         completed: 0,
         total: response.total,
         warning: response.warning,
@@ -403,9 +442,11 @@ async function requestDashDownload(url: string, audioOnly: boolean): Promise<voi
       return
     }
     if (response.ok === true) {
+      await readSession()
+      const position = waitingPosition(url)
       rememberDash(url, {
-        phase: 'downloading',
-        message: HLS_TEXT.started,
+        phase: position === undefined ? 'downloading' : 'queued',
+        message: position === undefined ? HLS_TEXT.started : queuedStatusText(position),
         completed: 0,
         total: 0,
         audioOnly,
@@ -652,6 +693,7 @@ async function load(): Promise<void> {
       jobs = {}
       dashJobs = {}
       bilibiliJobs = {}
+      queue = emptyQueue()
     }
     paint()
     void chrome.runtime.sendMessage({ type: MESSAGE_TYPE.HLS_SYNC }).catch(() => undefined)

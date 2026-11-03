@@ -88,6 +88,10 @@ function mediaHost(mediaUrl: string): string | undefined {
 export function buildRefererRules(input: {
   pageUrl: string
   mediaUrls: readonly string[]
+  /** 两条 B 站下载并行时，各用一段规则号。缺省从最小号开始。 */
+  idStart?: number
+  /** 这一段最多能放几条规则。 */
+  maxRules?: number
 }): { ok: true; rules: BilibiliRefererRule[]; ids: number[] } | { ok: false; error: string } {
   const referer = refererForPage(input.pageUrl)
   if (!referer) return { ok: false, error: BILIBILI_TEXT.badPage }
@@ -109,11 +113,16 @@ export function buildRefererRules(input: {
     if (!hosts.includes(host)) hosts.push(host)
   }
   if (hosts.length === 0) return { ok: false, error: BILIBILI_TEXT.badMedia }
-  if (hosts.length > BILIBILI_RULE_ID_MAX - BILIBILI_RULE_ID_MIN + 1) {
+  const idStart = input.idStart ?? BILIBILI_RULE_ID_MIN
+  const maxRules = input.maxRules ?? BILIBILI_RULE_ID_MAX - BILIBILI_RULE_ID_MIN + 1
+  if (hosts.length > maxRules) {
+    return { ok: false, error: BILIBILI_TEXT.tooManyRules }
+  }
+  if (idStart < BILIBILI_RULE_ID_MIN || idStart + hosts.length - 1 > BILIBILI_RULE_ID_MAX) {
     return { ok: false, error: BILIBILI_TEXT.tooManyRules }
   }
   const rules: BilibiliRefererRule[] = hosts.map((host, index) => ({
-    id: BILIBILI_RULE_ID_MIN + index,
+    id: idStart + index,
     priority: 1,
     action: {
       type: 'modifyHeaders',
@@ -148,42 +157,73 @@ export async function clearOwnedRefererRules(client: RefererRuleClient): Promise
   return ids
 }
 
-type Phase = 'idle' | 'arming' | 'live'
+type Phase = 'arming' | 'live'
+
+interface ActiveRefererJob {
+  phase: Phase
+  slot: number
+  ids: number[]
+  waiter?: { resolve: (result: RefererDownloadResult) => void }
+}
+
+/** 最多两条 B 站下载并行。32 个规则号分成两段，每段 16 个。 */
+const MAX_REFERER_JOBS = 2
+const RULES_PER_JOB = 16
 
 /**
  * 一次 B 站下载占用的规则。
  * 先加规则再跑 download；成功、失败、取消，以及 offscreen 不再跑这条任务时，都会删掉。
+ * 默认仍然一次只跑一条；下载队列传入 allowConcurrent 后最多两条并行。
  */
 export function createRefererSession(client: RefererRuleClient) {
-  let phase: Phase = 'idle'
-  let jobKey: string | undefined
-  let waiter: { jobKey: string; resolve: (result: RefererDownloadResult) => void } | undefined
+  const jobs = new Map<string, ActiveRefererJob>()
+  const usedSlots = new Set<number>()
 
   function finish(key: string, result: RefererDownloadResult): boolean {
-    if (waiter?.jobKey !== key) return false
-    const current = waiter
-    waiter = undefined
+    const job = jobs.get(key)
+    if (!job?.waiter) return false
+    const current = job.waiter
+    job.waiter = undefined
     current.resolve(result)
     return true
+  }
+
+  function firstFreeSlot(): number | undefined {
+    for (let slot = 0; slot < MAX_REFERER_JOBS; slot += 1) {
+      if (!usedSlots.has(slot)) return slot
+    }
+    return undefined
+  }
+
+  function markInterrupted(activeKeys: ReadonlySet<string>): void {
+    for (const [key, job] of jobs) {
+      // 还在加规则时不打断，避免刚开始就被一次同步清掉。
+      if (job.phase !== 'live') continue
+      if (activeKeys.has(key)) continue
+      finish(key, { ok: false, error: HLS_TEXT.interrupted })
+    }
   }
 
   return {
     /** download 里面用 wait 等到 offscreen 做完。finish 或下面的中断会解开这个等待。 */
     wait(key: string): Promise<RefererDownloadResult> {
       return new Promise((resolve) => {
-        waiter = { jobKey: key, resolve }
+        const job = jobs.get(key)
+        if (job) job.waiter = { resolve }
+        else resolve({ ok: false, error: HLS_TEXT.interrupted })
       })
     },
     finish,
     /**
      * offscreen 汇报的当前任务。
-     * 规则已经加上、但当前任务不是这一条时，当成后台页挂了，结束等待并由 finally 删规则。
-     * 还在加规则时不打断，避免刚开始就被一次同步清掉。
+     * 规则已经加上、但当前任务不在里面时，当成后台页挂了，结束等待并由 finally 删规则。
      */
+    onOffscreenActiveKeys(activeKeys: readonly string[] | undefined): void {
+      markInterrupted(new Set(activeKeys ?? []))
+    },
+    /** 兼容只传一条的旧调用。 */
     onOffscreenActiveKey(activeKey: string | undefined): void {
-      if (phase !== 'live' || !jobKey) return
-      if (activeKey === jobKey) return
-      finish(jobKey, { ok: false, error: HLS_TEXT.interrupted })
+      markInterrupted(new Set(activeKey ? [activeKey] : []))
     },
     async clearLeftovers(): Promise<number[]> {
       return clearOwnedRefererRules(client)
@@ -191,12 +231,22 @@ export function createRefererSession(client: RefererRuleClient) {
     async run(
       input: { pageUrl: string; mediaUrls: readonly string[]; jobKey: string },
       download: () => Promise<RefererDownloadResult>,
+      options: { allowConcurrent?: boolean } = {},
     ): Promise<RefererDownloadResult> {
-      if (phase !== 'idle') return { ok: false, error: HLS_TEXT.busy }
-      const built = buildRefererRules(input)
+      if (jobs.has(input.jobKey)) return { ok: false, error: HLS_TEXT.busy }
+      if (!options.allowConcurrent && jobs.size > 0) return { ok: false, error: HLS_TEXT.busy }
+      if (jobs.size >= MAX_REFERER_JOBS) return { ok: false, error: HLS_TEXT.busy }
+      const slot = firstFreeSlot()
+      if (slot === undefined) return { ok: false, error: HLS_TEXT.busy }
+      const built = buildRefererRules({
+        ...input,
+        idStart: BILIBILI_RULE_ID_MIN + slot * RULES_PER_JOB,
+        maxRules: RULES_PER_JOB,
+      })
       if (!built.ok) return built
-      phase = 'arming'
-      jobKey = input.jobKey
+      usedSlots.add(slot)
+      const job: ActiveRefererJob = { phase: 'arming', slot, ids: built.ids }
+      jobs.set(input.jobKey, job)
       let added = false
       try {
         try {
@@ -205,16 +255,15 @@ export function createRefererSession(client: RefererRuleClient) {
         } catch {
           return { ok: false, error: BILIBILI_TEXT.refererFailed }
         }
-        phase = 'live'
+        job.phase = 'live'
         return await download()
       } catch (error) {
         const message = error instanceof Error && error.message.trim() ? error.message.trim() : HLS_TEXT.internal
         return { ok: false, error: message }
       } finally {
-        const key = jobKey
-        phase = 'idle'
-        jobKey = undefined
-        if (key && waiter?.jobKey === key) finish(key, { ok: false, error: HLS_TEXT.interrupted })
+        const key = input.jobKey
+        jobs.delete(key)
+        usedSlots.delete(job.slot)
         if (added) {
           try {
             await applyRules(client, { removeRuleIds: built.ids })

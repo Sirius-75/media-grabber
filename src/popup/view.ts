@@ -12,6 +12,7 @@ import {
   type DownloadStatusRecord,
 } from '../shared/download-status'
 import { formatBytes } from '../shared/format'
+import { queuePosition, queuedStatusText, type DownloadQueueState } from '../shared/download-queue'
 import { DASH_NO_AUDIO_HINT, DASH_NOTE } from '../shared/dash-text'
 import type { HlsJobMap, HlsJobPhase, HlsJobRecord } from '../shared/hls-job'
 import type { BilibiliRole, MediaItem, MediaKind } from '../shared/types'
@@ -279,6 +280,7 @@ export function renderList(
   preferredVariant?: ReadonlyMap<string, string>,
   dashJobs?: HlsJobMap,
   bilibiliJobs?: HlsJobMap,
+  queue?: DownloadQueueState,
 ): void {
   const pairAudio = items.some((item) => item.bilibili?.role === 'audio')
   const ordered = orderForPopup(items)
@@ -292,6 +294,7 @@ export function renderList(
       hlsJobForItem(item, dashJobs),
       hlsJobForItem(item, bilibiliJobs),
       pairAudio,
+      queuedPositionForItem(item, queue),
     ),
   )
   list.replaceChildren(...rows)
@@ -380,6 +383,7 @@ function renderItem(
   dashJob: HlsJobRecord | undefined,
   bilibiliJob: HlsJobRecord | undefined,
   pairAudio: boolean,
+  queuedPosition: number | undefined,
 ): HTMLLIElement {
   const row = document.createElement('li')
   row.className = 'item'
@@ -508,6 +512,7 @@ function renderItem(
     } else if (
       hls?.phase === 'downloading' ||
       hls?.phase === 'inspecting' ||
+      hls?.phase === 'queued' ||
       hls?.phase === 'remuxing' ||
       hls?.phase === 'merging'
     ) {
@@ -529,7 +534,11 @@ function renderItem(
   }
 
   if (!segment && canOfferBilibiliDownload(item) && item.bilibili) {
-    const busy = hls?.phase === 'downloading' || hls?.phase === 'inspecting' || hls?.phase === 'merging'
+    const busy =
+      hls?.phase === 'downloading' ||
+      hls?.phase === 'inspecting' ||
+      hls?.phase === 'queued' ||
+      hls?.phase === 'merging'
     if (busy) {
       const cancel = document.createElement('button')
       cancel.type = 'button'
@@ -542,9 +551,23 @@ function renderItem(
   }
 
   row.append(actions)
-  if (hls) setRowStatus(row, { phase: hlsStatusPhase(hls.phase), message: hls.message })
-  else if (status) setRowStatus(row, status)
+  if (hls) {
+    const message =
+      hls.phase === 'queued' ? (queuedPosition === undefined ? '排队中' : queuedStatusText(queuedPosition)) : hls.message
+    setRowStatus(row, { phase: hlsStatusPhase(hls.phase), message })
+  } else if (status) setRowStatus(row, status)
   return row
+}
+
+/** 排队位置来自队列存储，不要求在任务记录里反复改写。 */
+function queuedPositionForItem(item: Pick<MediaItem, 'url'>, queue?: DownloadQueueState): number | undefined {
+  if (!queue) return undefined
+  const key = normalizeUrl(item.url) || item.url
+  const job =
+    queue.waiting.find((entry) => entry.key === item.url) ??
+    queue.waiting.find((entry) => entry.key === key)
+  if (!job) return undefined
+  return queuePosition(queue, job.id)
 }
 
 /** 视频行在没有可配对音频时，说明里补上没有声音。其它条目用原来的说明。 */

@@ -14,6 +14,7 @@ export const MAX_REMEMBERED_HLS_JOBS = 20
 export const HLS_JOB_PHASES = [
   'inspecting',
   'picking',
+  'queued',
   'downloading',
   'remuxing',
   'merging',

@@ -365,7 +365,7 @@ mux.js 的 Transmuxer 只吃 MPEG-TS（以及 AAC），不能把两路已经是 
 
 - 下载跑在同一个 offscreen 文档里（`src/offscreen/dash-task.ts`），不进 service worker。解析器不打进后台包。没有新权限。offscreen 只拉取和拼接；进度写入和 `chrome.downloads` 与 HLS 一样交给 service worker。视频和音频两个文件都这样保存。
 - 进度、取消、并发 4、失败后再试 2 次，都走原来的 `downloadSegmentsInOrder`。
-- 任务记录形状和 HLS 相同，单独放在 `chrome.storage.session` 的 `dash-jobs`。offscreen 把记录发给 service worker 再写入。关掉 popup 再打开还能看到。同一时间只允许一个 HLS、DASH 或 B 站下载。
+- 任务记录形状和 HLS 相同，单独放在 `chrome.storage.session` 的 `dash-jobs`。offscreen 把记录发给 service worker 再写入。关掉 popup 再打开还能看到。V4-3 起，HLS、DASH 和 B 站一起最多同时跑两个，多出来的先排队，见第 16 节。
 - 文件名用 `buildDownloadFilename`。直接把 `.mpd` 交给 `chrome.downloads` 会被拒绝，并提示用列表里的下载。
 
 ### 这一步故意不做
@@ -490,3 +490,12 @@ DASH 清单行和 B 站一样有两颗按钮：
 消息协议沿用 `BilibiliDownloadMessage` 的命名，在 `DashInspectMessage` 和 `DashDownloadMessage` 上增加可选的 `audioOnly`，由 `messages.ts` 的类型守卫校验。解析和下载计划在 `planDashDownload` 里用 `audioOnly` 区分视频 / 音频；选音轨时 `representationId` 是音频 Representation 的 id。`dash-task` 的每一次进度写入都带上 `hasVideo` / `hasAudio` / `audioOnly`，避免后台整条覆盖时丢掉按钮条件。V3-4 的三档排序和 `data-index` 保持不变。
 
 没有新增依赖，不设置任何自定义请求头，下载仍在 offscreen 里完成。
+
+
+## 16. V4-3 下载队列与并发限制
+
+版本仍是 0.2.4。没有新权限，也不新增依赖。
+
+`src/shared/download-queue.ts` 是纯函数队列，`MAX_CONCURRENT_JOBS = 2`。HLS、DASH、B 站这些经 offscreen 的任务先入队，普通 `chrome.downloads` 直链不占槽位。队列状态存在 `chrome.storage.session` 的 `download-queue`，service worker 被回收后能恢复：还活在 offscreen 里的 running 保留，不在的标成中断；排队超过 24 小时的也会清理，不会留下永远「排队中」的条目。
+
+弹窗里排队的条目显示「排队中（第 N 位）」，点「取消」直接把它移出队列，不会去碰 offscreen。前一条完成、失败或取消后，队首自动补位。offscreen 同时最多接受两条任务，仍然只使用 `chrome.runtime`；B 站的两条并行下载各用一段 Referer 规则号（910001–910032 分成两段），规则边界不变。

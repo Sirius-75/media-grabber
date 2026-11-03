@@ -6,8 +6,9 @@
 
 import { normalizeUrl } from '../shared/classify'
 import { HLS_TEXT, isHttpUrl } from '../shared/hls'
-import { readOffscreenActiveKey } from '../shared/offscreen-bridge'
+import { readOffscreenActiveKeys } from '../shared/offscreen-bridge'
 import { noteBilibiliOffscreen } from './bilibili-rules'
+import { cancelQueuedJob, enqueueHlsJob, reconcileDownloadQueue } from './queue'
 import { syncStoredJobs } from './offscreen-jobs'
 import {
   isHlsCancelMessage,
@@ -17,101 +18,12 @@ import {
   type HlsDownloadMessage,
   type HlsInspectMessage,
 } from '../shared/messages'
-import { getItems } from './store'
+import { downloadContext, ensureOffscreen, sendOffscreen } from './offscreen-doc'
 
-/** 和 src/offscreen/offscreen.html 的位置一致。构建后还在这个路径。 */
-const OFFSCREEN_PATH = 'src/offscreen/offscreen.html'
-
-let opening: Promise<void> | undefined
+export { downloadContext, ensureOffscreen, sendOffscreen }
 
 function warn(message: string, error: unknown): void {
   console.warn(`[media-grabber] ${message}`, error)
-}
-
-async function hasOffscreen(): Promise<boolean> {
-  if (typeof chrome.offscreen.hasDocument === 'function') {
-    try {
-      return await chrome.offscreen.hasDocument()
-    } catch (error) {
-      warn('检查 offscreen 失败', error)
-    }
-  }
-  const contexts = await chrome.runtime.getContexts({
-    contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT],
-  })
-  return contexts.length > 0
-}
-
-async function createOffscreen(): Promise<void> {
-  if (await hasOffscreen()) return
-  try {
-    await chrome.offscreen.createDocument({
-      url: `${OFFSCREEN_PATH}?role=offscreen`,
-      reasons: [chrome.offscreen.Reason.BLOBS],
-      justification:
-        '在扩展页面里把 HLS 或 DASH 分片拼成 Blob 再下载。Service worker 会被回收，不能在里面跑这个长任务。',
-    })
-  } catch (error) {
-    if (await hasOffscreen()) return
-    throw error
-  }
-}
-
-/** 整个扩展同时只能有一个 offscreen document。已经开着就复用。 */
-export function ensureOffscreen(): Promise<void> {
-  if (!opening) {
-    opening = createOffscreen().finally(() => {
-      opening = undefined
-    })
-  }
-  return opening
-}
-
-export async function sendOffscreen(message: Record<string, unknown>): Promise<unknown> {
-  await ensureOffscreen()
-  let lastError: unknown
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    try {
-      const response: unknown = await chrome.runtime.sendMessage(message)
-      if (response !== undefined) return response
-    } catch (error) {
-      lastError = error
-    }
-    await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)))
-  }
-  warn('offscreen 没有响应', lastError)
-  return undefined
-}
-
-async function activeTabId(): Promise<number | undefined> {
-  try {
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
-    const id = tabs[0]?.id
-    return typeof id === 'number' ? id : undefined
-  } catch (error) {
-    warn('读取当前标签页失败', error)
-    return undefined
-  }
-}
-
-async function pageTitle(tabId: number | undefined): Promise<string | undefined> {
-  try {
-    const id = tabId ?? (await activeTabId())
-    if (id === undefined) return undefined
-    return (await chrome.tabs.get(id)).title
-  } catch (error) {
-    warn('读取页面标题失败', error)
-    return undefined
-  }
-}
-
-async function listIndex(tabId: number | undefined, url: string): Promise<number | undefined> {
-  const id = tabId ?? (await activeTabId())
-  if (id === undefined) return undefined
-  const items = await getItems(id)
-  const normalized = normalizeUrl(url)
-  const index = items.findIndex((item) => item.url === normalized || item.url === url)
-  return index >= 0 ? index + 1 : undefined
 }
 
 function isFailure(value: unknown): value is { ok: false; error: string } {
@@ -125,49 +37,33 @@ function isFailure(value: unknown): value is { ok: false; error: string } {
   )
 }
 
-/** 页面标题和列表序号。DASH 和 HLS 保存文件名时共用。 */
-export async function downloadContext(
-  tabId: number | undefined,
-  url: string,
-): Promise<{ title?: string; index?: number }> {
-  const title = await pageTitle(tabId)
-  const index = await listIndex(tabId, url)
-  const context: { title?: string; index?: number } = {}
-  if (title) context.title = title
-  if (index !== undefined) context.index = index
-  return context
-}
-
-/** 问 offscreen 哪一条还在下，再把其余停在半截的进度标成中断。 */
+/** 问 offscreen 哪几条还在下，再把其余停在半截的进度标成中断。 */
 export async function relayJobSync(): Promise<{ ok: true }> {
-  let activeKey: string | undefined
+  let activeKeys: string[] = []
   try {
     const response = await sendOffscreen({ type: 'HLS_OFFSCREEN_SYNC' })
-    activeKey = readOffscreenActiveKey(response)
+    activeKeys = readOffscreenActiveKeys(response)
   } catch (error) {
     warn('读取正在下载的任务失败', error)
   }
   try {
-    await syncStoredJobs(activeKey)
+    await syncStoredJobs(activeKeys)
   } catch (error) {
     warn('写入中断状态失败', error)
   }
-  // B 站规则只在这条任务还在 offscreen 里时保留。同步发现它已经不在，就删掉。
-  noteBilibiliOffscreen(activeKey)
+  // B 站规则只在这些任务还在 offscreen 里时保留。同步发现它已经不在，就删掉。
+  noteBilibiliOffscreen(activeKeys)
+  try {
+    await reconcileDownloadQueue(activeKeys)
+  } catch (error) {
+    warn('同步下载队列失败', error)
+  }
   return { ok: true }
 }
 
 async function forwardDownload(playlistUrl: string, mediaUrl: string, tabId: number | undefined): Promise<unknown> {
-  const title = await pageTitle(tabId)
-  const index = await listIndex(tabId, playlistUrl)
-  const message: Record<string, unknown> = {
-    type: 'HLS_OFFSCREEN_DOWNLOAD',
-    playlistUrl,
-    mediaUrl,
-  }
-  if (title) message.title = title
-  if (index !== undefined) message.index = index
-  return sendOffscreen(message)
+  const context = await downloadContext(tabId, playlistUrl)
+  return enqueueHlsJob({ key: playlistUrl, mediaUrl, tabId, ...context })
 }
 
 async function inspect(message: HlsInspectMessage): Promise<unknown> {
@@ -231,13 +127,18 @@ export function handleHlsMessage(
   }
   if (isHlsCancelMessage(message)) {
     const playlistUrl = normalizeUrl(message.url) || message.url.trim()
-    void sendOffscreen({ type: 'HLS_OFFSCREEN_CANCEL', playlistUrl }).then(
-      (response) => sendResponse(response ?? { ok: true }),
-      (error: unknown) => {
-        warn('取消 HLS 失败', error)
-        sendResponse({ ok: false, error: HLS_TEXT.offscreen })
-      },
-    )
+    void cancelQueuedJob('hls', playlistUrl)
+      .then((cancelled) => {
+        if (cancelled) return { ok: true }
+        return sendOffscreen({ type: 'HLS_OFFSCREEN_CANCEL', playlistUrl })
+      })
+      .then(
+        (response) => sendResponse(response ?? { ok: true }),
+        (error: unknown) => {
+          warn('取消 HLS 失败', error)
+          sendResponse({ ok: false, error: HLS_TEXT.offscreen })
+        },
+      )
     return true
   }
   if (isHlsSyncMessage(message)) {

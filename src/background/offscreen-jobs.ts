@@ -91,12 +91,16 @@ function cancelStored(input: OffscreenCancelJob): Promise<Ack> {
   })
 }
 
-async function interrupt(storageKey: string, phases: ReadonlySet<string>, activeKey: string | undefined): Promise<void> {
+async function interrupt(
+  storageKey: string,
+  phases: ReadonlySet<string>,
+  activeKeys: ReadonlySet<string>,
+): Promise<void> {
   const map = await readMap(storageKey)
   let changed = false
   for (const [key, record] of Object.entries(map)) {
     if (!phases.has(record.phase)) continue
-    if (activeKey !== undefined && key === activeKey) continue
+    if (activeKeys.has(key)) continue
     map[key] = {
       ...record,
       phase: 'failed',
@@ -108,13 +112,37 @@ async function interrupt(storageKey: string, phases: ReadonlySet<string>, active
   if (changed) await saveMap(storageKey, map)
 }
 
-/** 把已经不在下载的进度标成中断。activeKey 是 offscreen 里还活着的那一条。 */
-export function syncStoredJobs(activeKey?: string): Promise<void> {
+/** 把已经不在下载的进度标成中断。activeKeys 是 offscreen 里还活着的任务。 */
+export function syncStoredJobs(activeKeys?: string | readonly string[]): Promise<void> {
+  const live = new Set(typeof activeKeys === 'string' ? [activeKeys] : (activeKeys ?? []))
   return enqueue(async () => {
-    await interrupt(HLS_JOB_STORAGE_KEY, HLS_ACTIVE_PHASES, activeKey)
-    await interrupt(DASH_JOB_STORAGE_KEY, DASH_ACTIVE_PHASES, activeKey)
-    await interrupt(BILIBILI_JOB_STORAGE_KEY, BILIBILI_ACTIVE_PHASES, activeKey)
+    await interrupt(HLS_JOB_STORAGE_KEY, HLS_ACTIVE_PHASES, live)
+    await interrupt(DASH_JOB_STORAGE_KEY, DASH_ACTIVE_PHASES, live)
+    await interrupt(BILIBILI_JOB_STORAGE_KEY, BILIBILI_ACTIVE_PHASES, live)
   })
+}
+
+/**
+ * 队列只改自己负责的阶段（排队 / 取消 / 中断），不覆盖 offscreen 刚写下的进度。
+ * 读取、判断和写回都在同一个串行队列里。
+ */
+export function updateStoredJob(
+  storageKey: string,
+  key: string,
+  update: (current: HlsJobRecord | undefined) => HlsJobRecord | undefined,
+): Promise<void> {
+  return enqueue(async () => {
+    const map = await readMap(storageKey)
+    const next = update(map[key])
+    if (!next) return
+    map[key] = next
+    await saveMap(storageKey, map)
+  })
+}
+
+/** 读某一种任务存储，给队列恢复时判断僵尸任务用。 */
+export function readStoredJobs(storageKey: string): Promise<HlsJobMap> {
+  return enqueue(() => readMap(storageKey))
 }
 
 function saveBlob(input: OffscreenSaveBlob): Promise<Ack & { downloadId?: number }> {
