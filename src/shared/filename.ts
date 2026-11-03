@@ -7,6 +7,9 @@
 /** 主体（不含扩展名）最长这么多个码点。远小于 Windows 单段 255 的上限。 */
 export const MAX_DOWNLOAD_STEM_LENGTH = 80
 
+/** 清晰度后缀最长这么多个码点，避免异常的清单字段把标题挤掉。 */
+export const MAX_DOWNLOAD_QUALITY_LENGTH = 24
+
 /** 标题和 URL 都拿不出名字时用它。 */
 export const DOWNLOAD_FILENAME_FALLBACK = '媒体'
 
@@ -40,6 +43,11 @@ export interface DownloadFilenameInput {
   index?: number
   /** 消息里自带的文件名。先清洗；洗完是空的再退回标题或 URL。 */
   filename?: string
+  /**
+   * 清晰度或音轨后缀，例如 1080P、4500kbps、音频。
+   * 有值时文件名是「标题-清晰度.扩展名」；音频由调用方传「音频」。
+   */
+  quality?: string
 }
 
 function graphemes(value: string): string[] {
@@ -151,9 +159,31 @@ function positiveIndex(index: number | undefined): number | undefined {
   return index
 }
 
+function positiveNumber(value: number | undefined): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined
+  return value
+}
+
+/**
+ * 从清单里的分辨率或带宽得到文件名后缀。
+ * 优先用高度（1080P），没有高度才退回带宽（4500kbps）；都没有就不加。
+ */
+export function formatQualitySuffix(input: { height?: number; bandwidth?: number }): string | undefined {
+  const height = positiveNumber(input.height)
+  if (height !== undefined) return `${Math.round(height)}P`
+  const bandwidth = positiveNumber(input.bandwidth)
+  if (bandwidth !== undefined) return `${Math.max(1, Math.round(bandwidth / 1000))}kbps`
+  return undefined
+}
+
+function cleanQuality(value: string | undefined): string {
+  if (typeof value !== 'string') return ''
+  return limitCodePoints(sanitizeStem(value), MAX_DOWNLOAD_QUALITY_LENGTH)
+}
+
 /**
  * 生成最终文件名，带正确扩展名。
- * 优先用 filename，其次页面标题（加序号），再其次 URL 文件名，最后用「媒体」。
+ * 优先用 filename，其次页面标题（加清晰度和序号），再其次 URL 文件名，最后用「媒体」。
  */
 export function buildDownloadFilename(input: DownloadFilenameInput): string {
   const fromUrl = fileNameFromUrl(input.url)
@@ -178,10 +208,12 @@ export function buildDownloadFilename(input: DownloadFilenameInput): string {
 
   stem = stripMediaExt(stem, ext) || DOWNLOAD_FILENAME_FALLBACK
 
+  const quality = cleanQuality(input.quality)
   const index = withIndex ? positiveIndex(input.index) : undefined
-  const suffix = index === undefined ? '' : `-${index}`
+  // 清晰度排在序号前面：标题-1080P-2.mp4。调用方不再给序号时就是标题-1080P.mp4。
+  const suffix = `${quality ? `-${quality}` : ''}${index === undefined ? '' : `-${index}`}`
   const room = Math.max(1, MAX_DOWNLOAD_STEM_LENGTH - graphemes(suffix).length)
-  // 先给序号留位置，再对完整主体做保留名和长度检查。
+  // 先给清晰度和序号留位置，再对完整主体做保留名和长度检查。
   const head = limitCodePoints(stem, room) || DOWNLOAD_FILENAME_FALLBACK
   const combined = fitStem(`${head}${suffix}`, MAX_DOWNLOAD_STEM_LENGTH)
   if (!ext) return combined

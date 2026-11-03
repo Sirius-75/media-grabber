@@ -159,7 +159,7 @@ describe('offscreen 任务不碰扩展 API（示例数据）', () => {
         title: '示例标题',
         index: 2,
         files: [
-          { url: 'https://cdn.example.test/example-data/video.m4s', role: 'video' },
+          { url: 'https://cdn.example.test/example-data/video.m4s', role: 'video', quality: '1080P' },
           { url: 'https://cdn.example.test/example-data/audio.m4s', role: 'audio' },
         ],
       },
@@ -180,7 +180,7 @@ describe('offscreen 任务不碰扩展 API（示例数据）', () => {
       },
     )
     expect(outcome).toEqual({ ok: true })
-    expect(saved.map((file) => file.filename)).toEqual(['示例标题-2.mp4', '示例标题-2.m4a'])
+    expect(saved.map((file) => file.filename)).toEqual(['示例标题-1080P.mp4', '示例标题-音频.m4a'])
     expect(saved.map((file) => file.type)).toEqual(['video/mp4', 'audio/mp4'])
     expect(writes.at(-1)).toContain('分开保存')
     expect(writes).toContain(FMP4_MERGE_TEXT.merging)
@@ -214,7 +214,7 @@ describe('offscreen 任务不碰扩展 API（示例数据）', () => {
       },
     }
     const files = [
-      { url: 'https://cdn.example.test/example-data/video.m4s', role: 'video' as const },
+      { url: 'https://cdn.example.test/example-data/video.m4s', role: 'video' as const, quality: '1080P' },
       { url: 'https://cdn.example.test/example-data/audio.m4s', role: 'audio' as const },
     ]
     const merged = await runBilibiliDownload(
@@ -230,7 +230,7 @@ describe('offscreen 任务不碰扩展 API（示例数据）', () => {
       },
     )
     expect(merged).toEqual({ ok: true })
-    expect(saved).toEqual(['示例标题-2.mp4'])
+    expect(saved).toEqual(['示例标题-1080P.mp4'])
     expect(writes).toContain('正在合并…')
     expect(writes.at(-1)).toContain('已合并')
 
@@ -249,7 +249,7 @@ describe('offscreen 任务不碰扩展 API（示例数据）', () => {
       },
     )
     expect(separate).toEqual({ ok: true })
-    expect(saved).toEqual(['示例标题-2.mp4', '示例标题-2.m4a'])
+    expect(saved).toEqual(['示例标题-1080P.mp4', '示例标题-音频.m4a'])
     expect(writes).not.toContain('正在合并…')
     expect(writes.at(-1)).toContain('分开保存')
   })
@@ -273,7 +273,7 @@ describe('offscreen 任务不碰扩展 API（示例数据）', () => {
       {
         key: 'https://cdn.example.test/example-data/video.m4s',
         files: [
-          { url: 'https://cdn.example.test/example-data/video.m4s', role: 'video' },
+          { url: 'https://cdn.example.test/example-data/video.m4s', role: 'video', quality: '1080P' },
           { url: 'https://cdn.example.test/example-data/audio.m4s', role: 'audio' },
         ],
       },

@@ -8,7 +8,7 @@
 import { describeDashFetchFailure, parseMpd, planDashDownload } from '../shared/dash'
 import { DASH_TEXT } from '../shared/dash-text'
 import { FMP4_MERGE_TEXT } from '../shared/fmp4-merge'
-import { buildDownloadFilename } from '../shared/filename'
+import { buildDownloadFilename, formatQualitySuffix } from '../shared/filename'
 import { downloadSegmentsInOrder } from '../shared/hls-download'
 import { fetchPlaylistText, fetchSegmentBytes } from '../shared/hls-fetch'
 import { HLS_TEXT, describePlaylistStatus, hlsProgressText } from '../shared/hls'
@@ -46,6 +46,12 @@ function chosenWarning(warning: string | undefined, separate: boolean): string |
 
 function warn(message: string, error: unknown): void {
   console.warn(`[media-grabber] ${message}`, error)
+}
+
+/** 音频固定写「音频」；视频优先用高度，没有高度时用带宽。 */
+function qualityOf(file: { kind: 'video' | 'audio'; height?: number; bandwidth?: number }): string | undefined {
+  if (file.kind === 'audio') return '音频'
+  return formatQualitySuffix({ height: file.height, bandwidth: file.bandwidth })
 }
 
 function job(input: Omit<HlsJobRecord, 'updatedAt'>): HlsJobRecord {
@@ -248,14 +254,29 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
         video: {
           parts: videoGroup.parts,
           mime: videoGroup.file.mime,
-          filename: buildDownloadFilename({ title: request.title, url: key, ext: videoGroup.file.ext, index: request.index }),
+          filename: buildDownloadFilename({
+            title: request.title,
+            url: key,
+            ext: videoGroup.file.ext,
+            quality: qualityOf(videoGroup.file),
+          }),
         },
         audio: {
           parts: audioGroup.parts,
           mime: audioGroup.file.mime,
-          filename: buildDownloadFilename({ title: request.title, url: key, ext: audioGroup.file.ext, index: request.index }),
+          filename: buildDownloadFilename({
+            title: request.title,
+            url: key,
+            ext: audioGroup.file.ext,
+            quality: qualityOf(audioGroup.file),
+          }),
         },
-        mergedFilename: buildDownloadFilename({ title: request.title, url: key, ext: 'mp4', index: request.index }),
+        mergedFilename: buildDownloadFilename({
+          title: request.title,
+          url: key,
+          ext: 'mp4',
+          quality: qualityOf(videoGroup.file),
+        }),
       })
       if (!host.still(controller)) return
       if (!outcome.ok) {
@@ -288,7 +309,7 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
         title: request.title,
         url: key,
         ext: group.file.ext,
-        index: request.index,
+        quality: qualityOf(group.file),
       })
       const savedFile = await saveBlobFile(group.parts, group.file.mime, filename)
       if (!host.still(controller)) return

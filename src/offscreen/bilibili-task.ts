@@ -98,6 +98,11 @@ function audioFailed(error: string): string {
   return `${DASH_TEXT.audioSaveFailed}：${error}`
 }
 
+/** 音频固定写「音频」；视频用播放信息里已有的清晰度。 */
+function qualityOf(role: BilibiliRole, ext: string, quality: string | undefined): string | undefined {
+  return role === 'audio' || ext === 'm4a' ? '音频' : quality
+}
+
 export async function runBilibiliDownload(
   request: BilibiliRunRequest,
   controller: AbortController,
@@ -124,7 +129,14 @@ export async function runBilibiliDownload(
       request.separate !== true &&
       request.files.length === 2 &&
       request.files.filter((file) => file.role === 'audio').length === 1
-    const held: Array<{ url: string; role: BilibiliRole; bytes: Uint8Array; ext: string; mime: string }> = []
+    const held: Array<{
+      url: string
+      role: BilibiliRole
+      bytes: Uint8Array
+      ext: string
+      mime: string
+      quality?: string
+    }> = []
     const withNotes = (message: string): string => (notes.length > 0 ? `${message}。${notes.join(' ')}` : message)
     /** 合并前音频失败或取消时，先把已经下完的视频落盘，避免白下。 */
     const keepVideo = async (): Promise<BilibiliOutcome | undefined> => {
@@ -135,7 +147,7 @@ export async function runBilibiliDownload(
         title: request.title,
         url: videoHeld.url,
         ext: videoHeld.ext,
-        index: request.index,
+        quality: videoHeld.quality,
       })
       const saved = await save([videoHeld.bytes], videoHeld.mime, filename)
       if (!host.still(controller)) return { ok: false, cancelled: true, error: HLS_TEXT.cancelled }
@@ -229,6 +241,7 @@ export async function runBilibiliDownload(
           bytes: fetched.file.bytes,
           ext: fetched.file.ext,
           mime: fetched.file.mime,
+          quality: qualityOf(file.role, fetched.file.ext, file.quality),
         })
         continue
       }
@@ -236,7 +249,7 @@ export async function runBilibiliDownload(
         title: request.title,
         url: file.url,
         ext: fetched.file.ext,
-        index: request.index,
+        quality: qualityOf(file.role, fetched.file.ext, file.quality),
       })
       const saved = await save([fetched.file.bytes], fetched.file.mime, filename)
       if (!host.still(controller)) return { ok: false, cancelled: true, error: HLS_TEXT.cancelled }
@@ -265,7 +278,7 @@ export async function runBilibiliDownload(
             title: request.title,
             url: item.url,
             ext: item.ext,
-            index: request.index,
+            quality: item.quality,
           })
           const saved = await save([item.bytes], item.mime, filename)
           if (!host.still(controller)) return { ok: false, cancelled: true, error: HLS_TEXT.cancelled }
@@ -306,7 +319,7 @@ export async function runBilibiliDownload(
               title: request.title,
               url: videoHeld.url,
               ext: videoHeld.ext,
-              index: request.index,
+              quality: videoHeld.quality,
             }),
           },
           audio: {
@@ -316,14 +329,14 @@ export async function runBilibiliDownload(
               title: request.title,
               url: audioHeld.url,
               ext: audioHeld.ext,
-              index: request.index,
+              quality: audioHeld.quality,
             }),
           },
           mergedFilename: buildDownloadFilename({
             title: request.title,
             url: videoHeld.url,
             ext: 'mp4',
-            index: request.index,
+            quality: videoHeld.quality,
           }),
         })
         if (!outcome.ok) {

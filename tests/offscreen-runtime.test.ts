@@ -294,7 +294,7 @@ describe('offscreen 只使用 chrome.runtime', () => {
     const saved = harness.sent.find((message) => message.type === OFFSCREEN_BRIDGE.SAVE_BLOB)
     expect(saved).toMatchObject({
       url: harness.created[0],
-      filename: 'Big Buck Bunny-1.mp4',
+      filename: 'Big Buck Bunny-1080P.mp4',
     })
     expect(Object.keys(saved ?? {}).sort()).toEqual(['filename', 'type', 'url'])
     const jobWrites = writes(harness.sent, HLS_JOB_STORAGE_KEY)
@@ -325,7 +325,7 @@ describe('offscreen 只使用 chrome.runtime', () => {
     await waitFor(() => harness.sent.filter((message) => message.type === OFFSCREEN_BRIDGE.SAVE_BLOB).length >= 2)
 
     const saved = harness.sent.filter((message) => message.type === OFFSCREEN_BRIDGE.SAVE_BLOB)
-    expect(saved.map((message) => message.filename)).toEqual(['Big Buck Bunny-2.mp4', 'Big Buck Bunny-2.m4a'])
+    expect(saved.map((message) => message.filename)).toEqual(['Big Buck Bunny-720P.mp4', 'Big Buck Bunny-音频.m4a'])
     expect(saved.map((message) => message.url)).toEqual(harness.created)
     expect(harness.revokeDelays).toEqual([60_000, 60_000])
     expect(harness.revoked).toEqual([])
@@ -398,7 +398,7 @@ describe('offscreen 只使用 chrome.runtime', () => {
     )
 
     const saved = harness.sent.find((message) => message.type === OFFSCREEN_BRIDGE.SAVE_BLOB)
-    expect(saved).toMatchObject({ filename: '加密测试-3.mp4' })
+    expect(saved).toMatchObject({ filename: '加密测试.mp4' })
     const keyHex = [...key].map((part) => part.toString(16).padStart(2, '0')).join('')
     const dumped = JSON.stringify(harness.sent)
     expect(dumped).not.toContain(keyHex)

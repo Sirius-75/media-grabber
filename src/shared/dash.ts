@@ -51,6 +51,10 @@ export interface DashFilePlan {
   mime: string
   /** 第一项是初始化段，后面是媒体分片。 */
   urls: string[]
+  /** 视频轨的像素高度，用来生成「标题-1080P.mp4」。 */
+  height?: number
+  /** 没有高度时用带宽生成后缀。 */
+  bandwidth?: number
 }
 
 export interface DashDownloadPlan {
@@ -540,12 +544,15 @@ export function parseMpd(xml: string, manifestUrl: string): DashParseResult {
 }
 
 function fileOf(track: DashTrack): DashFilePlan {
-  return {
+  const file: DashFilePlan = {
     kind: track.kind,
     ext: track.ext,
     mime: track.mime,
     urls: [track.initUrl, ...track.segments.map((segment) => segment.url)],
   }
+  if (track.height !== undefined) file.height = track.height
+  if (track.bandwidth > 0) file.bandwidth = track.bandwidth
+  return file
 }
 
 /**

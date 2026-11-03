@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   DOWNLOAD_FILENAME_FALLBACK,
+  MAX_DOWNLOAD_QUALITY_LENGTH,
   MAX_DOWNLOAD_STEM_LENGTH,
   buildDownloadFilename,
+  formatQualitySuffix,
   sanitizeStem,
 } from '../src/shared/filename'
 
@@ -139,5 +141,84 @@ describe('buildDownloadFilename', () => {
     expect(buildDownloadFilename({ url: 'https://cdn.example/clip.MP4' })).toBe('clip.mp4')
     expect(buildDownloadFilename({ url: 'https://cdn.example/clip.webm', ext: 'mp4' })).toBe('clip.mp4')
     expect(buildDownloadFilename({ title: '音频', ext: '.M4A', index: 1 })).toBe('音频-1.m4a')
+  })
+})
+
+describe('formatQualitySuffix', () => {
+  it('优先用高度，没有高度时用带宽，都没有就不加', () => {
+    expect(formatQualitySuffix({ height: 1080, bandwidth: 4_500_000 })).toBe('1080P')
+    expect(formatQualitySuffix({ height: 720 })).toBe('720P')
+    expect(formatQualitySuffix({ bandwidth: 4_500_000 })).toBe('4500kbps')
+    expect(formatQualitySuffix({ bandwidth: 999 })).toBe('1kbps')
+    expect(formatQualitySuffix({})).toBeUndefined()
+    expect(formatQualitySuffix({ height: 0, bandwidth: 0 })).toBeUndefined()
+    expect(formatQualitySuffix({ height: Number.NaN, bandwidth: -1 })).toBeUndefined()
+  })
+})
+
+describe('下载文件名里的清晰度后缀', () => {
+  it('有清晰度时是「标题-清晰度.扩展名」', () => {
+    expect(
+      buildDownloadFilename({
+        title: '某视频',
+        url: 'https://cdn.example/video.mpd',
+        ext: 'mp4',
+        quality: '1080P',
+      }),
+    ).toBe('某视频-1080P.mp4')
+    expect(
+      buildDownloadFilename({
+        title: '某视频',
+        ext: 'mp4',
+        quality: formatQualitySuffix({ bandwidth: 4_500_000 }),
+      }),
+    ).toBe('某视频-4500kbps.mp4')
+  })
+
+  it('没有清晰度时不加后缀，序号仍然可用', () => {
+    expect(buildDownloadFilename({ title: '某视频', ext: 'mp4' })).toBe('某视频.mp4')
+    expect(buildDownloadFilename({ title: '某视频', ext: 'mp4', index: 2 })).toBe('某视频-2.mp4')
+  })
+
+  it('音频用「标题-音频.m4a」', () => {
+    expect(
+      buildDownloadFilename({
+        title: '某视频',
+        url: 'https://cdn.example/audio.m4s',
+        ext: 'm4a',
+        quality: '音频',
+      }),
+    ).toBe('某视频-音频.m4a')
+  })
+
+  it('清晰度里的非法字符会被清洗，且不会太长', () => {
+    expect(
+      buildDownloadFilename({
+        title: '某视频',
+        ext: 'mp4',
+        quality: '10/80:P',
+      }),
+    ).toBe('某视频-1080P.mp4')
+    const long = buildDownloadFilename({
+      title: '某视频',
+      ext: 'mp4',
+      quality: '超'.repeat(100),
+    })
+    expect(long.endsWith('.mp4')).toBe(true)
+    const stem = long.slice(0, -'.mp4'.length)
+    expect(Array.from(stem).length).toBeLessThanOrEqual(MAX_DOWNLOAD_STEM_LENGTH)
+    expect(stem).toContain(`-${'超'.repeat(MAX_DOWNLOAD_QUALITY_LENGTH)}`)
+  })
+
+  it('长标题截断后仍保留清晰度和扩展名', () => {
+    const name = buildDownloadFilename({
+      title: '测'.repeat(200),
+      ext: 'mp4',
+      quality: '1080P',
+    })
+    expect(name.endsWith('-1080P.mp4')).toBe(true)
+    const stem = name.slice(0, -'.mp4'.length)
+    expect(Array.from(stem).length).toBeLessThanOrEqual(MAX_DOWNLOAD_STEM_LENGTH)
+    expect(name).not.toMatch(ILLEGAL)
   })
 })

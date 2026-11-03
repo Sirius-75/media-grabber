@@ -13,7 +13,7 @@
  */
 
 import { describeInterruptReason } from '../shared/interrupt-reason'
-import { buildDownloadFilename } from '../shared/filename'
+import { buildDownloadFilename, formatQualitySuffix } from '../shared/filename'
 import { decryptDownloadedParts, loadAes128Keys } from '../shared/hls-aes'
 import { downloadSegmentsInOrder } from '../shared/hls-download'
 import { fetchPlaylistText, fetchSegmentBytes } from '../shared/hls-fetch'
@@ -228,6 +228,7 @@ async function runDownload(request: DownloadRequest, controller: AbortController
   const key = request.playlistUrl
   try {
     let bandwidth: number | undefined
+    let quality: string | undefined
     let separateAudio = false
     if (request.mediaUrl !== request.playlistUrl) {
       const master = await loadPlaylist(request.playlistUrl, signal)
@@ -246,6 +247,7 @@ async function runDownload(request: DownloadRequest, controller: AbortController
         return
       }
       bandwidth = variant.bandwidth > 0 ? variant.bandwidth : undefined
+      quality = formatQualitySuffix({ height: variant.height, bandwidth: variant.bandwidth })
       separateAudio = variant.separateAudio
     }
 
@@ -436,7 +438,7 @@ async function runDownload(request: DownloadRequest, controller: AbortController
       title: request.title,
       url: key,
       ext: planned.ext,
-      index: request.index,
+      quality,
     })
     const saved = await saveBlobFile(planned.parts, planned.mime, filename)
     if (!stillCurrent(controller)) return
@@ -480,7 +482,9 @@ function readBilibiliFiles(value: unknown): BilibiliDownloadFile[] | undefined {
   for (const entry of value) {
     if (!isRecord(entry) || typeof entry.url !== 'string' || entry.url.trim() === '') return undefined
     if (typeof entry.role !== 'string' || !BILIBILI_ROLES.has(entry.role as BilibiliRole)) return undefined
-    files.push({ url: entry.url.trim(), role: entry.role as BilibiliRole })
+    const file: BilibiliDownloadFile = { url: entry.url.trim(), role: entry.role as BilibiliRole }
+    if (typeof entry.quality === 'string' && entry.quality.trim()) file.quality = entry.quality.trim()
+    files.push(file)
   }
   return files
 }

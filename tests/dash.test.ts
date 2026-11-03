@@ -82,6 +82,8 @@ describe('解析 MPD', () => {
     expect(plan.warning).toContain('合并')
     expect(plan.warning).toContain('带宽最高')
     expect(plan.files.map((file) => file.ext)).toEqual(['mp4', 'm4a'])
+    expect(plan.files[0]).toMatchObject({ kind: 'video', height: 720, bandwidth: 2_000_000 })
+    expect(plan.files[1]).toMatchObject({ kind: 'audio', bandwidth: 128_000 })
   })
 
   it('多清晰度时先返回选项，默认顺序是最高在前', () => {
