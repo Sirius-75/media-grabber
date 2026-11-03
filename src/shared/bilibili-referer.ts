@@ -262,14 +262,19 @@ export function createRefererSession(client: RefererRuleClient) {
         return { ok: false, error: message }
       } finally {
         const key = input.jobKey
+        // 先让 busy 判断不再看到这条已结束的任务；槽位要等规则删完才放。
         jobs.delete(key)
-        usedSlots.delete(job.slot)
-        if (added) {
-          try {
-            await applyRules(client, { removeRuleIds: built.ids })
-          } catch {
-            // 删不掉就留到下次启动时按 id 区间清理。
+        try {
+          if (added) {
+            try {
+              await applyRules(client, { removeRuleIds: built.ids })
+            } catch {
+              // 删不掉就留到下次启动时按 id 区间清理。
+            }
           }
+        } finally {
+          // 删除失败时也要放槽位。只有旧规则删完后，别的任务才能复用这段号。
+          usedSlots.delete(job.slot)
         }
       }
     },

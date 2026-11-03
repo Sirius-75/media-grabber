@@ -223,6 +223,97 @@ describe('Referer 规则生命周期（示例数据）', () => {
     await expect(first).resolves.toEqual({ ok: true })
     expect(store.rules()).toEqual([])
   })
+
+  it('旧规则删除还没完成时，新任务用另一段规则号，旧删除不会误删新规则', async () => {
+    const store = memoryClient()
+    let releaseRemove: (() => void) | undefined
+    let removeStarted: (() => void) | undefined
+    let removeApplied: (() => void) | undefined
+    const removeStartedPromise = new Promise<void>((resolve) => {
+      removeStarted = resolve
+    })
+    const removeAppliedPromise = new Promise<void>((resolve) => {
+      removeApplied = resolve
+    })
+    let delayed = false
+    const client: RefererRuleClient = {
+      async getSessionRules() {
+        return store.client.getSessionRules()
+      },
+      async updateSessionRules(update) {
+        if (update.removeRuleIds?.length && !update.addRules?.length && !delayed) {
+          delayed = true
+          removeStarted?.()
+          await new Promise<void>((resolve) => {
+            releaseRemove = resolve
+          })
+          await store.client.updateSessionRules(update)
+          removeApplied?.()
+          return
+        }
+        await store.client.updateSessionRules(update)
+      },
+    }
+    const session = createRefererSession(client)
+    const first = session.run(input, async () => ({ ok: true }))
+    await removeStartedPromise
+    let secondDownloading: (() => void) | undefined
+    const secondDownloadingPromise = new Promise<void>((resolve) => {
+      secondDownloading = resolve
+    })
+    let releaseSecond: (() => void) | undefined
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve
+    })
+    const secondInput = { ...input, jobKey: AUDIO, mediaUrls: [AUDIO] }
+    const second = session.run(
+      secondInput,
+      async () => {
+        secondDownloading?.()
+        await secondGate
+        return { ok: true }
+      },
+      { allowConcurrent: true },
+    )
+    await secondDownloadingPromise
+    expect(store.calls().filter((call) => call.addRules?.length).map((call) => call.addRules?.map((rule) => rule.id))).toEqual([
+      [BILIBILI_RULE_ID_MIN],
+      [BILIBILI_RULE_ID_MIN + 16],
+    ])
+    expect(store.rules().map((rule) => rule.id)).toContain(BILIBILI_RULE_ID_MIN + 16)
+    releaseRemove?.()
+    await removeAppliedPromise
+    expect(store.rules().map((rule) => rule.id)).toEqual([BILIBILI_RULE_ID_MIN + 16])
+    releaseSecond?.()
+    await expect(second).resolves.toEqual({ ok: true })
+    await expect(first).resolves.toEqual({ ok: true })
+    expect(store.rules()).toEqual([])
+  })
+
+  it('删除规则抛错时槽位仍会释放', async () => {
+    const store = memoryClient()
+    let failRemove = true
+    const client: RefererRuleClient = {
+      async getSessionRules() {
+        return store.client.getSessionRules()
+      },
+      async updateSessionRules(update) {
+        if (update.removeRuleIds?.length && !update.addRules?.length && failRemove) {
+          failRemove = false
+          throw new Error('删除规则失败')
+        }
+        await store.client.updateSessionRules(update)
+      },
+    }
+    const session = createRefererSession(client)
+    await expect(session.run(input, async () => ({ ok: true }))).resolves.toEqual({ ok: true })
+    const secondInput = { ...input, jobKey: AUDIO, mediaUrls: [AUDIO] }
+    await expect(session.run(secondInput, async () => ({ ok: true }))).resolves.toEqual({ ok: true })
+    expect(
+      store.calls().filter((call) => call.addRules?.length).map((call) => call.addRules?.map((rule) => rule.id)),
+    ).toEqual([[BILIBILI_RULE_ID_MIN], [BILIBILI_RULE_ID_MIN]])
+    expect(store.rules()).toEqual([])
+  })
 })
 
 describe('下载流程先加规则（示例数据）', () => {
