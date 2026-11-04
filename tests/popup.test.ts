@@ -395,6 +395,85 @@ describe('HLS 下载界面', () => {
     )
   })
 
+  it('直播条目有「录制直播」；录制中显示状态并提供停止并保存和取消', () => {
+    const list = document.createElement('ul')
+    const actions: string[] = []
+    bindListActions(list, () => [hls], {
+      onCopy() {},
+      onDownload() {},
+      onHlsLive(url) {
+        actions.push(`live:${url}`)
+      },
+      onHlsLiveStop(url) {
+        actions.push(`stop:${url}`)
+      },
+      onHlsLiveCancel(url) {
+        actions.push(`cancel:${url}`)
+      },
+    })
+    renderList(list, [hls])
+    const liveButton = list.querySelector<HTMLButtonElement>('[data-action="hls-live"]')
+    expect(liveButton?.textContent).toBe('录制直播')
+    liveButton?.click()
+    expect(actions).toEqual([`live:${hls.url}`])
+
+    renderList(list, [hls], undefined, {
+      [hls.url]: {
+        phase: 'recording',
+        message: '正在录制 01:05 / 已录 1.5 KB',
+        completed: 1536,
+        total: 0,
+        live: true,
+        updatedAt: 2,
+      },
+    })
+    expect(list.querySelector('.status')?.textContent).toBe('正在录制 01:05 / 已录 1.5 KB')
+    expect(list.querySelector('.status')?.className).toContain('status-started')
+    expect(list.querySelector('[data-action="hls-download"]')).toBeNull()
+    const stop = list.querySelector<HTMLButtonElement>('[data-action="hls-live-stop"]')
+    expect(stop?.textContent).toBe('停止并保存')
+    stop?.click()
+    list.querySelector<HTMLButtonElement>('[data-action="hls-live-cancel"]')?.click()
+    expect(actions).toEqual([
+      `live:${hls.url}`,
+      `stop:${hls.url}`,
+      `cancel:${hls.url}`,
+    ])
+  })
+
+  it('直播主清单先选清晰度，按钮是「开始录制」', () => {
+    const list = document.createElement('ul')
+    const high = 'https://cdn.example/live/high.m3u8'
+    const low = 'https://cdn.example/live/low.m3u8'
+    const starts: string[] = []
+    bindListActions(list, () => [hls], {
+      onCopy() {},
+      onDownload() {},
+      onHlsLiveStart(_url, mediaUrl) {
+        starts.push(mediaUrl)
+      },
+    })
+    renderList(list, [hls], undefined, {
+      [hls.url]: {
+        phase: 'picking',
+        message: '请选择清晰度',
+        completed: 0,
+        total: 0,
+        live: true,
+        updatedAt: 1,
+        variants: [
+          { url: high, label: '1920×1080 · 4500 kbps', bandwidth: 4500000, separateAudio: false },
+          { url: low, label: '640×360 · 800 kbps', bandwidth: 800000, separateAudio: false },
+        ],
+      },
+    })
+    const select = list.querySelector('select')
+    expect(select?.value).toBe(high)
+    expect(list.querySelector('[data-action="hls-live-start"]')?.textContent).toBe('开始录制')
+    list.querySelector<HTMLButtonElement>('[data-action="hls-live-start"]')?.click()
+    expect(starts).toEqual([high])
+  })
+
   it('AES-128 清单仍可下载，备注写含加密；不支持的加密只显示原因', () => {
     const list = document.createElement('ul')
     renderList(list, [hls])

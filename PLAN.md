@@ -152,7 +152,7 @@ flowchart LR
 
 1. **DRM / 加密**：带 EME 加密的内容（Netflix、付费平台等）不处理。HLS 的标准 AES-128（`METHOD=AES-128`，密钥格式是 identity 或缺省，密钥地址是 http 或 https）可以下载，见第 11 节。`METHOD=NONE` 不算加密。SAMPLE-AES、`KEYFORMAT` 不是 identity、清单里出现 FairPlay / Widevine / PlayReady 的迹象，都会用中文拒绝。密钥要能用普通请求拿到；401、403 或网络失败就停，不伪造请求头。
 2. **blob: / MSE**：大多数现代播放器（YouTube 等）用 MediaSource 播放，`<video>` 上看到的是 `blob:`，无法直接下载；真实地址往往是分片或清单，只能靠 webRequest 去碰运气。B 站视频页没有 `.mpd`，分轨地址从页面脚本或 `*.bilivideo.com` 上的单个 `.m4s` 读取，见第 12 节。
-3. **分片流**：未加密的 HLS 点播、标准 AES-128 的 HLS 点播，以及未加密的 DASH 静态点播可以下载，见第 10、11 节。DASH 的视频和音频通常是两条 fMP4，扩展会存成两个文件，不会合成一个。直播、SAMPLE-AES、DRM、多 Period、SegmentBase 不下载。AES-128 解密后的 MPEG-TS 会转封装成 fMP4；转失败或文件太大时仍保存 `.ts`。带 `#EXT-X-MAP` 的 fMP4 只做顺序拼接，这种清单如果同时还是 AES-128，会拒绝。B 站分轨见第 12 节，和 HLS 解密不是一条路径。
+3. **分片流**：未加密的 HLS 点播、标准 AES-128 的 HLS 点播，以及未加密的 DASH 静态点播可以下载，见第 10、11 节。DASH 的视频和音频通常是两条 fMP4，扩展会存成两个文件，不会合成一个。HLS 直播可以录制，见第 17 节；DASH 直播、SAMPLE-AES、DRM、多 Period、SegmentBase 不下载。AES-128 解密后的 MPEG-TS 会转封装成 fMP4；转失败或文件太大时仍保存 `.ts`。带 `#EXT-X-MAP` 的 fMP4 只做顺序拼接，这种清单如果同时还是 AES-128，会拒绝。B 站分轨见第 12 节，和 HLS 解密不是一条路径。
 4. **大小未知**：分块传输、没有 `Content-Length`、或者只看到 Range 片段时，大小显示"未知"或不准。
 5. **防盗链 / 鉴权**：有些链接依赖 Referer、Cookie 或会过期的签名，`chrome.downloads` 下载可能报 403，复制出去用也可能失效。普通直链、HLS 和 DASH 仍然不改请求头。只有 B 站分轨下载会给扩展自己的请求补上页面 Referer，而且只下页面现在就能播的内容。链接过期后要先刷新页面再下载。
 6. **Service worker 回收**：SW 被回收期间发生的请求不会丢（事件会唤醒 SW），但内存状态会丢，所以一律用 storage.session。
@@ -255,7 +255,7 @@ flowchart LR
 - [ ] 扩展的 errors 页面没有报错
 - [ ] 访问带 DRM 的页面时扩展不做任何绕过，只按普通资源规则列出能看到的 URL
 - [ ] 未加密 HLS 点播：主清单能选清晰度（默认最高），进度条会走，取消有效，关掉 popup 再打开还能看到进度
-- [ ] 直播 m3u8、SAMPLE-AES、非 identity 的 KEYFORMAT、带 Widevine / PlayReady / FairPlay 迹象的清单会用中文拒绝，不会开始下分片
+- [ ] HLS 直播 m3u8 显示「录制直播」，能停止并保存；SAMPLE-AES、非 identity 的 KEYFORMAT、带 Widevine / PlayReady / FairPlay 迹象的清单会用中文拒绝，不会开始下分片
 - [ ] 标准 AES-128 点播可以下载。条目备注写「含 AES-128 加密」。密钥返回 401、403 或不是 16 字节时，用中文停下来，不伪造 Referer 或其他请求头
 - [ ] 未加密的 DASH 点播：多清晰度能选（默认最高视频），进度条会走，取消有效。视频和音频分开时默认合并成一个 `.mp4`，合并中显示「正在合并…」，关掉弹窗再打开还能看到。合并失败、合计超过 1GB，或勾选「分开保存视频和音频」时保存两个文件，并写明原因。直播、ContentProtection、多个 Period、SegmentBase 会用中文拒绝
 - [ ] 下载出来的文件：普通 TS 转封装成功时是 `.mp4`（fMP4，没有重编码，文件头时长是实际总时长）；转封装失败时是 `.ts`，条目上写明可用 VLC 播放。带 EXT-X-MAP 的 fMP4 仍是顺序拼接的 `.mp4`。AES-128 解密成功但转封装失败时，保存的 `.ts` 是明文，不是密文
@@ -371,7 +371,7 @@ mux.js 的 Transmuxer 只吃 MPEG-TS（以及 AAC），不能把两路已经是 
 ### 这一步故意不做
 
 - v2 不解密。标准 AES-128 见第 11 节。SAMPLE-AES 和 DRM 仍然不做。HLS 和 DASH 不伪造 Referer 或任何请求头。B 站分轨是第 12 节的例外。
-- 不下载直播。
+- v2 不下载直播。V4-5 起 HLS 直播可以录制，见第 17 节；DASH 直播仍不下载。
 - 不重新编码。mux.js 不认识的编码保留 `.ts`。
 - v2 不把分开的音视频合成一个文件。两路 fMP4 的合并在第 13 节，用纯 TypeScript 改 box，不用 mux.js，也不重编码。
 - 不在 service worker 里跑分片循环或转封装。
@@ -393,7 +393,7 @@ V3-1 没有新权限。版本号在 V3-2 升到 0.2.1，见第 12 节。
    - 起始清单里有 DRM 迹象：`com.apple.streamingkeydelivery`、`skd://`、Widevine URN `edef8ba9-79d6-4ace-a3c8-27dcd51d21ed`、PlayReady URN `9a04f079-9840-4286-ab92-e65be0885f95`，以及 `com.widevine`、`com.microsoft.playready`。
    - 密钥不是 16 字节，或加密分片长度不是 16 的整数倍。
    - 带 `EXT-X-MAP` 的 AES-128。解密后要走 TS 转封装，fMP4 初始化段这条路径不做。
-   - 直播和 `EXT-X-BYTERANGE` 跟以前一样拒绝。
+   - `EXT-X-BYTERANGE` 跟以前一样拒绝。V4-5 起没有 `EXT-X-ENDLIST` 的媒体清单走直播录制，见第 17 节。
 3. **取密钥和解密**（`src/shared/hls-aes.ts`，在 offscreen 页面里调用）
    - 和分片一样用普通 `fetch`：不设置 `headers`，不伪造 Referer、Cookie 或 UA，不用 `declarativeNetRequest`。`credentials: 'include'` 只带浏览器里已经有的 Cookie。
    - 401、403、404、网络失败或密钥长度不对，就停，中文说明是获取密钥失败。不去绕。
@@ -499,3 +499,11 @@ DASH 清单行和 B 站一样有两颗按钮：
 `src/shared/download-queue.ts` 是纯函数队列，`MAX_CONCURRENT_JOBS = 2`。HLS、DASH、B 站这些经 offscreen 的任务先入队，普通 `chrome.downloads` 直链不占槽位。队列状态存在 `chrome.storage.session` 的 `download-queue`，service worker 被回收后能恢复：还活在 offscreen 里的 running 保留，不在的标成中断；排队超过 24 小时的也会清理，不会留下永远「排队中」的条目。
 
 弹窗里排队的条目显示「排队中（第 N 位）」，点「取消」直接把它移出队列，不会去碰 offscreen。前一条完成、失败或取消后，队首自动补位。offscreen 同时最多接受两条任务，仍然只使用 `chrome.runtime`；B 站的两条并行下载各用一段 Referer 规则号（910001–910032 分成两段），规则边界不变。
+
+## 17. V4-5 HLS 直播录制
+
+版本仍是 0.2.4。没有新权限，也不新增依赖，不改 Referer 规则。
+
+没有 `EXT-X-ENDLIST` 的媒体清单不再直接拒绝，`src/shared/hls.ts` 返回 `kind: 'live'`，并记下 `EXT-X-TARGETDURATION` 和每片的 `EXT-X-MEDIA-SEQUENCE`。主清单仍走原来的选清晰度逻辑。点「录制直播」后，`src/shared/hls-live.ts` 在 offscreen 里用 setTimeout 链轮询（间隔是目标时长的一半，夹在 1 到 5 秒），按 media sequence 去重，只下载新分片；标准 AES-128 沿用点播的取密钥、解密方式。SAMPLE-AES、DRM、非 identity 的 KEYFORMAT、字节范围仍然拒绝。
+
+录制中弹窗显示「正在录制 mm:ss / 已录 X MB」，有「停止并保存」和「取消」。停止只中断轮询，已经录到的分片继续走点播的 TS 转封装和时长修正；转封装失败保存 `.ts`。取消不保存。已录达到 1GB、清单出现 `EXT-X-ENDLIST`、连续 30 秒没有新分片、清单连续失败 5 次时自动停止并保存，并在条目说明里写原因。直播任务也进入 V4-3 的下载队列。

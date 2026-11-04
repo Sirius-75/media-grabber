@@ -17,7 +17,7 @@ import {
   type OffscreenWriteJob,
 } from '../shared/offscreen-bridge'
 
-const HLS_ACTIVE_PHASES = new Set(['downloading', 'inspecting', 'remuxing'])
+const HLS_ACTIVE_PHASES = new Set(['downloading', 'inspecting', 'recording', 'remuxing'])
 const DASH_ACTIVE_PHASES = new Set(['downloading', 'inspecting', 'merging'])
 const BILIBILI_ACTIVE_PHASES = new Set(['downloading', 'merging'])
 

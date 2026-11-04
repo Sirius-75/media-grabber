@@ -45,6 +45,8 @@ import {
   type DownloadMessage,
   type HlsDownloadMessage,
   type HlsInspectMessage,
+  type HlsLiveInspectMessage,
+  type HlsLiveStartMessage,
 } from '../shared/messages'
 import type { MediaItem } from '../shared/types'
 import {
@@ -259,6 +261,7 @@ function sameJobs(left: HlsJobMap, right: HlsJobMap): boolean {
     if (a.phase !== b.phase || a.message !== b.message || a.completed !== b.completed) return false
     if (a.total !== b.total || a.warning !== b.warning) return false
     if (a.hasVideo !== b.hasVideo || a.hasAudio !== b.hasAudio || a.audioOnly !== b.audioOnly) return false
+    if (a.live !== b.live) return false
     const leftVariants = a.variants ?? []
     const rightVariants = b.variants ?? []
     if (leftVariants.length !== rightVariants.length) return false
@@ -353,6 +356,19 @@ async function requestHlsDownload(url: string): Promise<void> {
       paint()
       return
     }
+    if ('kind' in response && response.kind === 'live') {
+      rememberRetry(url, { kind: 'hls', mode: 'live', mediaUrl: url })
+      rememberJob(url, {
+        phase: 'picking',
+        message: HLS_TEXT.liveHint,
+        completed: 0,
+        total: 0,
+        live: true,
+        warning: response.warning,
+      })
+      paint()
+      return
+    }
     if ('kind' in response && response.kind === 'master') {
       rememberJob(url, {
         phase: 'picking',
@@ -412,6 +428,190 @@ async function startHlsDownload(url: string, mediaUrl: string): Promise<void> {
     }
   } catch {
     rememberJob(url, { phase: 'failed', message: HLS_TEXT.offscreen, completed: 0, total: 0 })
+    paint()
+  }
+}
+
+async function requestHlsLive(url: string): Promise<void> {
+  rememberRetry(url, { kind: 'hls', mode: 'live', mediaUrl: url })
+  rememberJob(url, {
+    phase: 'inspecting',
+    message: HLS_TEXT.inspecting,
+    completed: 0,
+    total: 0,
+    live: true,
+  })
+  paint()
+  const message: HlsLiveInspectMessage = { type: MESSAGE_TYPE.HLS_LIVE_INSPECT, url }
+  if (tabId !== undefined) message.tabId = tabId
+  try {
+    const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))
+    if (!response || response.ok === false) {
+      rememberJob(url, {
+        phase: 'failed',
+        message: response && response.ok === false ? response.error : '读取清单失败',
+        completed: 0,
+        total: 0,
+        live: true,
+      })
+      paint()
+      return
+    }
+    if ('kind' in response && response.kind === 'master') {
+      rememberJob(url, {
+        phase: 'picking',
+        message: HLS_TEXT.picking,
+        completed: 0,
+        total: 0,
+        variants: response.variants,
+        warning: response.warning,
+        live: true,
+      })
+      paint()
+      return
+    }
+    if ('kind' in response && response.kind === 'live') {
+      await startHlsLive(url, url, response.warning)
+      return
+    }
+    rememberJob(url, {
+      phase: 'failed',
+      message: HLS_TEXT.liveNotLive,
+      completed: 0,
+      total: 0,
+      live: true,
+    })
+    paint()
+  } catch {
+    rememberJob(url, {
+      phase: 'failed',
+      message: '读取清单失败',
+      completed: 0,
+      total: 0,
+      live: true,
+    })
+    paint()
+  }
+}
+
+async function startHlsLive(url: string, mediaUrl: string, warning?: string): Promise<void> {
+  if (!mediaUrl) {
+    rememberJob(url, {
+      phase: 'failed',
+      message: HLS_TEXT.noVariants,
+      completed: 0,
+      total: 0,
+      live: true,
+    })
+    paint()
+    return
+  }
+  rememberRetry(url, { kind: 'hls', mode: 'live', mediaUrl })
+  preferredVariant.set(url, mediaUrl)
+  rememberJob(url, {
+    phase: 'recording',
+    message: HLS_TEXT.liveStarting,
+    completed: 0,
+    total: 0,
+    live: true,
+    warning,
+  })
+  paint()
+  const message: HlsLiveStartMessage = { type: MESSAGE_TYPE.HLS_LIVE_START, url, mediaUrl }
+  if (tabId !== undefined) message.tabId = tabId
+  try {
+    const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))
+    if (!response || response.ok === false) {
+      rememberJob(url, {
+        phase: 'failed',
+        message: response && response.ok === false ? response.error : HLS_TEXT.offscreen,
+        completed: 0,
+        total: 0,
+        live: true,
+        warning,
+      })
+      paint()
+      return
+    }
+    // 后台可能把这条排进队列，storage 里才是真正的状态。
+    await readSession()
+    const position = waitingPosition(url)
+    if (position !== undefined) {
+      rememberJob(url, {
+        phase: 'queued',
+        message: queuedStatusText(position),
+        completed: 0,
+        total: 0,
+        live: true,
+        warning,
+      })
+      paint()
+    }
+  } catch {
+    rememberJob(url, {
+      phase: 'failed',
+      message: HLS_TEXT.offscreen,
+      completed: 0,
+      total: 0,
+      live: true,
+      warning,
+    })
+    paint()
+  }
+}
+
+async function stopHlsLive(url: string): Promise<void> {
+  const previous = jobs[statusKey(url)]
+  rememberJob(url, {
+    phase: 'remuxing',
+    message: HLS_TEXT.liveStopAndSave,
+    completed: previous?.completed ?? 0,
+    total: previous?.total ?? 0,
+    live: true,
+    warning: previous?.warning,
+    recordedMs: previous?.recordedMs,
+    recordedBytes: previous?.recordedBytes,
+  })
+  paint()
+  try {
+    const response = readHlsUserResponse(
+      await chrome.runtime.sendMessage({ type: MESSAGE_TYPE.HLS_LIVE_STOP, url }),
+    )
+    if (response && response.ok === false) {
+      rememberJob(url, {
+        phase: 'failed',
+        message: response.error,
+        completed: 0,
+        total: 0,
+        live: true,
+      })
+      paint()
+    }
+  } catch {
+    rememberJob(url, {
+      phase: 'failed',
+      message: '停止录制失败，请再试一次',
+      completed: 0,
+      total: 0,
+      live: true,
+    })
+    paint()
+  }
+}
+
+async function cancelHlsLive(url: string): Promise<void> {
+  rememberJob(url, { phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0, live: true })
+  paint()
+  try {
+    await chrome.runtime.sendMessage({ type: MESSAGE_TYPE.HLS_LIVE_CANCEL, url })
+  } catch {
+    rememberJob(url, {
+      phase: 'failed',
+      message: '取消失败，请再试一次',
+      completed: 0,
+      total: 0,
+      live: true,
+    })
     paint()
   }
 }
@@ -703,6 +903,7 @@ async function retryDownload(url: string, button: HTMLButtonElement): Promise<vo
   const plan = retries[statusKey(url)]
   if (plan?.kind === 'hls') {
     if (plan.mode === 'download' && plan.mediaUrl) await startHlsDownload(url, plan.mediaUrl)
+    else if (plan.mode === 'live' && plan.mediaUrl) await startHlsLive(url, plan.mediaUrl)
     else await requestHlsDownload(url)
     return
   }
@@ -841,6 +1042,18 @@ function start(): void {
     },
     onHlsVariant(url, mediaUrl) {
       preferredVariant.set(url, mediaUrl)
+    },
+    onHlsLive(url) {
+      void requestHlsLive(url)
+    },
+    onHlsLiveStart(url, mediaUrl) {
+      void startHlsLive(url, mediaUrl)
+    },
+    onHlsLiveStop(url) {
+      void stopHlsLive(url)
+    },
+    onHlsLiveCancel(url) {
+      void cancelHlsLive(url)
     },
     onDashDownload(url) {
       void requestDashDownload(url, false)

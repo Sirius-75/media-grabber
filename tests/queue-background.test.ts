@@ -143,4 +143,21 @@ describe('后台下载队列', () => {
     ])
     expect(state.waiting).toHaveLength(0)
   })
+
+  it('直播录制任务派发到 HLS_OFFSCREEN_LIVE_START', async () => {
+    const { storage, sent } = installChrome()
+    const queue = await import('../src/background/queue')
+    await queue.enqueueHlsJob({
+      key: 'https://cdn.example/live.m3u8',
+      mediaUrl: 'https://cdn.example/live.m3u8',
+      live: true,
+    })
+    await waitFor(() => sent.some((message) => message.type === 'HLS_OFFSCREEN_LIVE_START'))
+    expect(sent.filter((message) => message.type === 'HLS_OFFSCREEN_LIVE_START')).toHaveLength(1)
+    expect(queued(storage).running[0]).toMatchObject({ kind: 'hls', live: true })
+    expect(readHlsJobMap(storage.get(HLS_JOB_STORAGE_KEY))['https://cdn.example/live.m3u8']).toMatchObject({
+      phase: 'recording',
+      live: true,
+    })
+  })
 })

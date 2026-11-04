@@ -278,6 +278,10 @@ export interface ListActions {
   onHlsStart?: (url: string, mediaUrl: string, button: HTMLButtonElement) => void
   onHlsCancel?: (url: string, button: HTMLButtonElement) => void
   onHlsVariant?: (url: string, mediaUrl: string) => void
+  onHlsLive?: (url: string, button: HTMLButtonElement) => void
+  onHlsLiveStart?: (url: string, mediaUrl: string, button: HTMLButtonElement) => void
+  onHlsLiveStop?: (url: string, button: HTMLButtonElement) => void
+  onHlsLiveCancel?: (url: string, button: HTMLButtonElement) => void
   onDashDownload?: (url: string, button: HTMLButtonElement) => void
   onDashAudio?: (url: string, button: HTMLButtonElement) => void
   onDashStart?: (url: string, mediaUrl: string, button: HTMLButtonElement) => void
@@ -346,6 +350,14 @@ export function bindListActions(
       const mediaUrl = select instanceof HTMLSelectElement ? select.value : ''
       actions.onHlsStart?.(item.url, mediaUrl, button)
     }
+    if (button.dataset.action === 'hls-live') actions.onHlsLive?.(item.url, button)
+    if (button.dataset.action === 'hls-live-start') {
+      const select = row.querySelector('select')
+      const mediaUrl = select instanceof HTMLSelectElement ? select.value : ''
+      actions.onHlsLiveStart?.(item.url, mediaUrl, button)
+    }
+    if (button.dataset.action === 'hls-live-stop') actions.onHlsLiveStop?.(item.url, button)
+    if (button.dataset.action === 'hls-live-cancel') actions.onHlsLiveCancel?.(item.url, button)
     if (button.dataset.action === 'dash-download') actions.onDashDownload?.(item.url, button)
     if (button.dataset.action === 'dash-audio') actions.onDashAudio?.(item.url, button)
     if (button.dataset.action === 'dash-cancel') actions.onDashCancel?.(item.url, button)
@@ -461,6 +473,7 @@ function renderItem(
   if (
     hls?.warning &&
     (hls.phase === 'downloading' ||
+      hls.phase === 'recording' ||
       hls.phase === 'picking' ||
       hls.phase === 'failed' ||
       hls.phase === 'remuxing' ||
@@ -525,9 +538,24 @@ function renderItem(
       if (chosen) select.value = chosen
       const start = document.createElement('button')
       start.type = 'button'
-      start.dataset.action = `${prefix}-start`
-      start.textContent = '开始下载'
+      if (hls.live === true) {
+        start.dataset.action = 'hls-live-start'
+        start.textContent = '开始录制'
+      } else {
+        start.dataset.action = `${prefix}-start`
+        start.textContent = '开始下载'
+      }
       actions.append(select, start)
+    } else if (segment.action === 'hls' && hls?.phase === 'recording') {
+      const stop = document.createElement('button')
+      stop.type = 'button'
+      stop.dataset.action = 'hls-live-stop'
+      stop.textContent = '停止并保存'
+      const cancel = document.createElement('button')
+      cancel.type = 'button'
+      cancel.dataset.action = 'hls-live-cancel'
+      cancel.textContent = '取消'
+      actions.append(stop, cancel)
     } else if (
       hls?.phase === 'downloading' ||
       hls?.phase === 'inspecting' ||
@@ -548,7 +576,11 @@ function renderItem(
       download.className = 'hls-download'
       download.dataset.action = 'hls-download'
       download.textContent = '下载'
-      actions.append(download)
+      const live = document.createElement('button')
+      live.type = 'button'
+      live.dataset.action = 'hls-live'
+      live.textContent = '录制直播'
+      actions.append(download, live)
     }
   }
 

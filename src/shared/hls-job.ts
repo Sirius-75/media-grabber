@@ -16,6 +16,7 @@ export const HLS_JOB_PHASES = [
   'picking',
   'queued',
   'downloading',
+  'recording',
   'remuxing',
   'merging',
   'complete',
@@ -47,6 +48,12 @@ export interface HlsJobRecord {
   hasAudio?: boolean
   /** 这一次 DASH 任务只下载音频。选择清晰度时也要沿用。 */
   audioOnly?: boolean
+  /** 这是 HLS 直播录制，不是点播下载。 */
+  live?: boolean
+  /** 已录时长（毫秒）。只有直播录制会写。 */
+  recordedMs?: number
+  /** 已录字节。只有直播录制会写。 */
+  recordedBytes?: number
   updatedAt: number
   /**
    * 同一次下载的写入序号。这条清单重新开始后会变大。
@@ -130,11 +137,18 @@ function parseJob(value: unknown): HlsJobRecord | undefined {
     if (typeof value.epoch !== 'number' || !Number.isInteger(value.epoch) || value.epoch < 0) return undefined
     record.epoch = value.epoch
   }
-  for (const key of ['hasVideo', 'hasAudio', 'audioOnly'] as const) {
+  for (const key of ['hasVideo', 'hasAudio', 'audioOnly', 'live'] as const) {
     const flag = value[key]
     if (flag !== undefined) {
       if (typeof flag !== 'boolean') return undefined
       record[key] = flag
+    }
+  }
+  for (const key of ['recordedMs', 'recordedBytes'] as const) {
+    const number = value[key]
+    if (number !== undefined) {
+      if (typeof number !== 'number' || !Number.isFinite(number) || number < 0) return undefined
+      record[key] = number
     }
   }
   return record
@@ -164,6 +178,8 @@ export interface HlsInspectResponseMaster {
   kind: 'master'
   variants: HlsVariantChoice[]
   warning?: string
+  /** 这是直播主清单，选完清晰度后开始录制。 */
+  live?: boolean
   /** DASH 清单里的轨道情况，HLS 不写。 */
   hasVideo?: boolean
   hasAudio?: boolean
@@ -180,6 +196,13 @@ export interface HlsInspectResponseMedia {
   hasAudio?: boolean
 }
 
+export interface HlsInspectResponseLive {
+  ok: true
+  kind: 'live'
+  targetDuration: number
+  warning?: string
+}
+
 export interface HlsInspectResponseError {
   ok: false
   error: string
@@ -191,6 +214,7 @@ export interface HlsInspectResponseError {
 export type HlsUserResponse =
   | HlsInspectResponseMaster
   | HlsInspectResponseMedia
+  | HlsInspectResponseLive
   | HlsInspectResponseError
   | { ok: true }
 
@@ -221,6 +245,10 @@ export function readHlsUserResponse(value: unknown): HlsUserResponse | undefined
       if (typeof value.warning !== 'string' || value.warning.trim() === '') return undefined
       master.warning = value.warning.trim()
     }
+    if (value.live !== undefined) {
+      if (typeof value.live !== 'boolean') return undefined
+      master.live = value.live
+    }
     for (const key of ['hasVideo', 'hasAudio'] as const) {
       const flag = value[key]
       if (flag !== undefined) {
@@ -244,6 +272,21 @@ export function readHlsUserResponse(value: unknown): HlsUserResponse | undefined
         if (typeof flag !== 'boolean') return undefined
         response[key] = flag
       }
+    }
+    return response
+  }
+  if (value.kind === 'live') {
+    if (typeof value.targetDuration !== 'number' || !Number.isFinite(value.targetDuration) || value.targetDuration < 0) {
+      return undefined
+    }
+    const response: HlsInspectResponseLive = {
+      ok: true,
+      kind: 'live',
+      targetDuration: value.targetDuration,
+    }
+    if (value.warning !== undefined) {
+      if (typeof value.warning !== 'string' || value.warning.trim() === '') return undefined
+      response.warning = value.warning.trim()
     }
     return response
   }

@@ -9,7 +9,7 @@ export const DOWNLOAD_RETRY_STORAGE_KEY = 'download-retry'
 export type BilibiliRetryMode = 'with-audio' | 'audio-only' | 'video-only'
 
 export type DownloadRetryPlan =
-  | { kind: 'hls'; mode: 'inspect' | 'download'; mediaUrl?: string }
+  | { kind: 'hls'; mode: 'inspect' | 'download' | 'live'; mediaUrl?: string }
   | {
       kind: 'dash'
       mode: 'inspect' | 'download'
@@ -32,13 +32,13 @@ function nonEmptyString(value: unknown): value is string {
 function parsePlan(value: unknown): DownloadRetryPlan | undefined {
   if (!isRecord(value)) return undefined
   if (value.kind === 'hls') {
-    if (value.mode !== 'inspect' && value.mode !== 'download') return undefined
+    if (value.mode !== 'inspect' && value.mode !== 'download' && value.mode !== 'live') return undefined
     const plan: DownloadRetryPlan = { kind: 'hls', mode: value.mode }
     if (value.mediaUrl !== undefined) {
       if (!nonEmptyString(value.mediaUrl)) return undefined
       plan.mediaUrl = value.mediaUrl.trim()
     }
-    if (plan.mode === 'download' && !plan.mediaUrl) return undefined
+    if ((plan.mode === 'download' || plan.mode === 'live') && !plan.mediaUrl) return undefined
     return plan
   }
   if (value.kind === 'dash') {

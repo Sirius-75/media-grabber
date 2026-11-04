@@ -172,6 +172,10 @@ describe('下载队列存储形状', () => {
       separate: true,
     })
     expect(parsed.waiting[1]?.kind === 'bilibili' && parsed.waiting[1].files).toHaveLength(2)
+
+    const live = readDownloadQueue({ running: [{ ...hls('live'), live: true }], waiting: [] })
+    expect(live.running[0]).toMatchObject({ kind: 'hls', live: true })
+    expect(readDownloadQueue({ running: [{ ...hls('bad'), live: 'yes' }], waiting: [] })).toEqual(emptyQueue())
   })
 
   it('写坏的值整个丢掉，重复 id 只留第一次', () => {

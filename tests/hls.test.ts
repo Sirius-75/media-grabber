@@ -134,7 +134,12 @@ describe('拒绝', () => {
 
   it('不是清单、直播、加密、字节范围、缺口、多个初始化段、fMP4 缺 MAP', () => {
     expect(parseHlsPlaylist('hello', base)).toEqual({ ok: false, error: HLS_TEXT.notPlaylist })
-    expect(parseHlsPlaylist('#EXTM3U\n#EXTINF:1,\na.ts\n', base)).toEqual({ ok: false, error: HLS_TEXT.live })
+    const live = parseHlsPlaylist('#EXTM3U\n#EXTINF:1,\na.ts\n', base)
+    expect(live.ok).toBe(true)
+    if (!live.ok || live.kind !== 'live') return
+    expect(live.live.segments.map((segment) => segment.url)).toEqual(['https://cdn.example/a.ts'])
+    expect(live.live.mediaSequence).toBe(0)
+    expect(live.live.targetDuration).toBe(2)
     expect(media('#EXT-X-KEY:METHOD=SAMPLE-AES,URI="https://cdn.example/key"\n#EXTINF:1,\na.ts')).toEqual({
       ok: false,
       error: HLS_TEXT.sampleAes,
@@ -399,9 +404,14 @@ describe('AES-128 清单', () => {
         base,
       ),
     ).toEqual({ ok: false, error: HLS_TEXT.badKeyUri })
-    expect(
-      parseHlsPlaylist('#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="https://cdn.example/k"\n#EXTINF:1,\na.ts\n', base),
-    ).toEqual({ ok: false, error: HLS_TEXT.live })
+    const liveAes = parseHlsPlaylist(
+      '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="https://cdn.example/k"\n#EXTINF:1,\na.ts\n',
+      base,
+    )
+    expect(liveAes.ok).toBe(true)
+    if (!liveAes.ok || liveAes.kind !== 'live') return
+    expect(liveAes.live.aes128).toBe(true)
+    expect(liveAes.live.segments[0]?.aes128?.keyUrl).toBe('https://cdn.example/k')
     expect(
       parseHlsPlaylist(
         `#EXTM3U\n#EXTINF:1,\n#EXT-X-BYTERANGE:100@0\na.ts\n${end}\n`,

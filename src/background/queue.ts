@@ -40,7 +40,7 @@ import { updateStoredJob } from './offscreen-jobs'
 
 type Result = { ok: true } | { ok: false; error: string }
 
-const HLS_ACTIVE = new Set(['downloading', 'inspecting', 'remuxing'])
+const HLS_ACTIVE = new Set(['downloading', 'inspecting', 'recording', 'remuxing'])
 const DASH_ACTIVE = new Set(['downloading', 'inspecting', 'merging'])
 const BILIBILI_ACTIVE = new Set(['downloading', 'merging'])
 
@@ -111,6 +111,7 @@ function setQueuedStatus(job: QueueJob, message: string, force = false): Promise
       total: 0,
       updatedAt: Date.now(),
     }
+    if (job.kind === 'hls' && job.live === true) record.live = true
     return record
   })
 }
@@ -120,12 +121,15 @@ function setStartingStatus(job: QueueJob): Promise<void> {
   return updateStoredJob(storageKeyOf(job.kind), job.key, (current) => {
     if (!current) return current
     if (current.phase !== 'queued') return current
-    return {
+    const live = job.kind === 'hls' && job.live === true
+    const next: HlsJobRecord = {
       ...current,
-      phase: 'downloading',
-      message: job.kind === 'bilibili' ? BILIBILI_TEXT.preparing : HLS_TEXT.started,
+      phase: live ? 'recording' : 'downloading',
+      message: job.kind === 'bilibili' ? BILIBILI_TEXT.preparing : live ? HLS_TEXT.liveStarting : HLS_TEXT.started,
       updatedAt: Date.now(),
     }
+    if (live) next.live = true
+    return next
   })
 }
 
@@ -176,7 +180,7 @@ async function failDispatch(job: QueueJob, message: string): Promise<void> {
 
 async function dispatchHls(job: HlsQueueJob): Promise<void> {
   const message: Record<string, unknown> = {
-    type: 'HLS_OFFSCREEN_DOWNLOAD',
+    type: job.live === true ? 'HLS_OFFSCREEN_LIVE_START' : 'HLS_OFFSCREEN_DOWNLOAD',
     playlistUrl: job.key,
     mediaUrl: job.mediaUrl,
   }
@@ -353,6 +357,7 @@ function enqueueNew(job: QueueJob): Promise<Result> {
 export function enqueueHlsJob(input: {
   key: string
   mediaUrl: string
+  live?: boolean
   tabId?: number
   title?: string
   index?: number
@@ -364,6 +369,7 @@ export function enqueueHlsJob(input: {
     mediaUrl: input.mediaUrl,
     enqueuedAt: Date.now(),
   }
+  if (input.live === true) job.live = true
   if (input.tabId !== undefined) job.tabId = input.tabId
   if (input.title) job.title = input.title
   if (input.index !== undefined) job.index = input.index

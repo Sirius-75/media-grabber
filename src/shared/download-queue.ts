@@ -36,6 +36,8 @@ export interface QueueJobBase {
 export interface HlsQueueJob extends QueueJobBase {
   kind: 'hls'
   mediaUrl: string
+  /** 这是直播录制。派发时走 HLS_OFFSCREEN_LIVE_START，而不是点播下载。 */
+  live?: boolean
 }
 
 export interface DashQueueJob extends QueueJobBase {
@@ -240,7 +242,10 @@ function parseJob(value: unknown): QueueJob | undefined {
   if (!base) return undefined
   if (value.kind === 'hls') {
     if (!nonEmptyString(value.mediaUrl)) return undefined
-    return { ...base, kind: 'hls', mediaUrl: value.mediaUrl.trim() }
+    if (!optionalBoolean(value.live)) return undefined
+    const job: HlsQueueJob = { ...base, kind: 'hls', mediaUrl: value.mediaUrl.trim() }
+    if (value.live === true) job.live = true
+    return job
   }
   if (value.kind === 'dash') {
     if (!optionalBoolean(value.separate) || !optionalBoolean(value.audioOnly)) return undefined

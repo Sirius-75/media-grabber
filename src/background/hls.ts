@@ -14,9 +14,15 @@ import {
   isHlsCancelMessage,
   isHlsDownloadMessage,
   isHlsInspectMessage,
+  isHlsLiveCancelMessage,
+  isHlsLiveInspectMessage,
+  isHlsLiveStartMessage,
+  isHlsLiveStopMessage,
   isHlsSyncMessage,
   type HlsDownloadMessage,
   type HlsInspectMessage,
+  type HlsLiveInspectMessage,
+  type HlsLiveStartMessage,
 } from '../shared/messages'
 import { downloadContext, ensureOffscreen, sendOffscreen } from './offscreen-doc'
 
@@ -66,6 +72,38 @@ async function forwardDownload(playlistUrl: string, mediaUrl: string, tabId: num
   return enqueueHlsJob({ key: playlistUrl, mediaUrl, tabId, ...context })
 }
 
+async function forwardLive(playlistUrl: string, mediaUrl: string, tabId: number | undefined): Promise<unknown> {
+  const context = await downloadContext(tabId, playlistUrl)
+  return enqueueHlsJob({ key: playlistUrl, mediaUrl, live: true, tabId, ...context })
+}
+
+async function liveInspect(message: HlsLiveInspectMessage): Promise<unknown> {
+  const playlistUrl = normalizeUrl(message.url) || message.url.trim()
+  if (!isHttpUrl(playlistUrl)) return { ok: false, error: HLS_TEXT.badPlaylistUrl }
+  try {
+    await ensureOffscreen()
+  } catch (error) {
+    warn('打开 offscreen 失败', error)
+    return { ok: false, error: HLS_TEXT.offscreen }
+  }
+  const inspected = await sendOffscreen({ type: 'HLS_OFFSCREEN_LIVE_INSPECT', playlistUrl })
+  return inspected ?? { ok: false, error: HLS_TEXT.offscreen }
+}
+
+async function liveStart(message: HlsLiveStartMessage): Promise<unknown> {
+  const playlistUrl = normalizeUrl(message.url) || message.url.trim()
+  const mediaUrl = message.mediaUrl.trim()
+  if (!isHttpUrl(playlistUrl) || !isHttpUrl(mediaUrl)) return { ok: false, error: HLS_TEXT.badPlaylistUrl }
+  try {
+    await ensureOffscreen()
+  } catch (error) {
+    warn('打开 offscreen 失败', error)
+    return { ok: false, error: HLS_TEXT.offscreen }
+  }
+  const started = await forwardLive(playlistUrl, mediaUrl, message.tabId)
+  return started ?? { ok: false, error: HLS_TEXT.offscreen }
+}
+
 async function inspect(message: HlsInspectMessage): Promise<unknown> {
   const playlistUrl = normalizeUrl(message.url) || message.url.trim()
   if (!isHttpUrl(playlistUrl)) return { ok: false, error: HLS_TEXT.badPlaylistUrl }
@@ -77,6 +115,15 @@ async function inspect(message: HlsInspectMessage): Promise<unknown> {
   }
   const inspected = await sendOffscreen({ type: 'HLS_OFFSCREEN_INSPECT', playlistUrl })
   if (inspected === undefined) return { ok: false, error: HLS_TEXT.offscreen }
+  if (
+    typeof inspected === 'object' &&
+    inspected !== null &&
+    'kind' in inspected &&
+    inspected.kind === 'live'
+  ) {
+    // 直播不在这里自动开始，等用户点「录制直播」。
+    return inspected
+  }
   if (
     typeof inspected === 'object' &&
     inspected !== null &&
@@ -136,6 +183,47 @@ export function handleHlsMessage(
         (response) => sendResponse(response ?? { ok: true }),
         (error: unknown) => {
           warn('取消 HLS 失败', error)
+          sendResponse({ ok: false, error: HLS_TEXT.offscreen })
+        },
+      )
+    return true
+  }
+  if (isHlsLiveInspectMessage(message)) {
+    void liveInspect(message).then(sendResponse, (error: unknown) => {
+      warn('检查 HLS 直播清单失败', error)
+      sendResponse({ ok: false, error: HLS_TEXT.offscreen })
+    })
+    return true
+  }
+  if (isHlsLiveStartMessage(message)) {
+    void liveStart(message).then(sendResponse, (error: unknown) => {
+      warn('开始录制 HLS 直播失败', error)
+      sendResponse({ ok: false, error: HLS_TEXT.offscreen })
+    })
+    return true
+  }
+  if (isHlsLiveStopMessage(message)) {
+    const playlistUrl = normalizeUrl(message.url) || message.url.trim()
+    void sendOffscreen({ type: 'HLS_OFFSCREEN_LIVE_STOP', playlistUrl }).then(
+      (response) => sendResponse(response ?? { ok: true }),
+      (error: unknown) => {
+        warn('停止录制 HLS 直播失败', error)
+        sendResponse({ ok: false, error: HLS_TEXT.offscreen })
+      },
+    )
+    return true
+  }
+  if (isHlsLiveCancelMessage(message)) {
+    const playlistUrl = normalizeUrl(message.url) || message.url.trim()
+    void cancelQueuedJob('hls', playlistUrl)
+      .then((cancelled) => {
+        if (cancelled) return { ok: true }
+        return sendOffscreen({ type: 'HLS_OFFSCREEN_LIVE_CANCEL', playlistUrl })
+      })
+      .then(
+        (response) => sendResponse(response ?? { ok: true }),
+        (error: unknown) => {
+          warn('取消 HLS 直播录制失败', error)
           sendResponse({ ok: false, error: HLS_TEXT.offscreen })
         },
       )
