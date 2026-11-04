@@ -12,12 +12,14 @@ import {
   canOfferDashDownload,
   canOfferDownload,
   canOfferHlsDownload,
+  canRetryDownload,
   hlsJobForItem,
   downloadFeedback,
   flashButton,
   isMediaItemList,
   itemNote,
   kindLabel,
+  pageTitleText,
   renderList,
   setRowStatus,
   sortItemsForPopup,
@@ -25,6 +27,7 @@ import {
   statusFromDownloadResponse,
   truncateUrl,
 } from '../src/popup/view'
+import { LARGE_MERGE_WARNING } from '../src/shared/size-warning'
 
 function item(overrides: Partial<MediaItem> & Pick<MediaItem, 'url' | 'kind'>): MediaItem {
   return {
@@ -390,6 +393,85 @@ describe('HLS 下载界面', () => {
     expect(hlsJobForItem(hls, { [hls.url]: { phase: 'failed', message: '服务器拒绝访问（403）', completed: 0, total: 1, updatedAt: 3 } })?.message).toBe(
       '服务器拒绝访问（403）',
     )
+  })
+
+  it('直播条目有「录制直播」；录制中显示状态并提供停止并保存和取消', () => {
+    const list = document.createElement('ul')
+    const actions: string[] = []
+    bindListActions(list, () => [hls], {
+      onCopy() {},
+      onDownload() {},
+      onHlsLive(url) {
+        actions.push(`live:${url}`)
+      },
+      onHlsLiveStop(url) {
+        actions.push(`stop:${url}`)
+      },
+      onHlsLiveCancel(url) {
+        actions.push(`cancel:${url}`)
+      },
+    })
+    renderList(list, [hls])
+    const liveButton = list.querySelector<HTMLButtonElement>('[data-action="hls-live"]')
+    expect(liveButton?.textContent).toBe('录制直播')
+    liveButton?.click()
+    expect(actions).toEqual([`live:${hls.url}`])
+
+    renderList(list, [hls], undefined, {
+      [hls.url]: {
+        phase: 'recording',
+        message: '正在录制 01:05 / 已录 1.5 KB',
+        completed: 1536,
+        total: 0,
+        live: true,
+        updatedAt: 2,
+      },
+    })
+    expect(list.querySelector('.status')?.textContent).toBe('正在录制 01:05 / 已录 1.5 KB')
+    expect(list.querySelector('.status')?.className).toContain('status-started')
+    expect(list.querySelector('[data-action="hls-download"]')).toBeNull()
+    const stop = list.querySelector<HTMLButtonElement>('[data-action="hls-live-stop"]')
+    expect(stop?.textContent).toBe('停止并保存')
+    stop?.click()
+    list.querySelector<HTMLButtonElement>('[data-action="hls-live-cancel"]')?.click()
+    expect(actions).toEqual([
+      `live:${hls.url}`,
+      `stop:${hls.url}`,
+      `cancel:${hls.url}`,
+    ])
+  })
+
+  it('直播主清单先选清晰度，按钮是「开始录制」', () => {
+    const list = document.createElement('ul')
+    const high = 'https://cdn.example/live/high.m3u8'
+    const low = 'https://cdn.example/live/low.m3u8'
+    const starts: string[] = []
+    bindListActions(list, () => [hls], {
+      onCopy() {},
+      onDownload() {},
+      onHlsLiveStart(_url, mediaUrl) {
+        starts.push(mediaUrl)
+      },
+    })
+    renderList(list, [hls], undefined, {
+      [hls.url]: {
+        phase: 'picking',
+        message: '请选择清晰度',
+        completed: 0,
+        total: 0,
+        live: true,
+        updatedAt: 1,
+        variants: [
+          { url: high, label: '1920×1080 · 4500 kbps', bandwidth: 4500000, separateAudio: false },
+          { url: low, label: '640×360 · 800 kbps', bandwidth: 800000, separateAudio: false },
+        ],
+      },
+    })
+    const select = list.querySelector('select')
+    expect(select?.value).toBe(high)
+    expect(list.querySelector('[data-action="hls-live-start"]')?.textContent).toBe('开始录制')
+    list.querySelector<HTMLButtonElement>('[data-action="hls-live-start"]')?.click()
+    expect(starts).toEqual([high])
   })
 
   it('AES-128 清单仍可下载，备注写含加密；不支持的加密只显示原因', () => {
@@ -801,12 +883,190 @@ describe('B 站分轨按钮（示例数据）', () => {
     expect(downloads).toEqual([video.url])
   })
 
-  it('DASH 清单仍然只有一颗下载', () => {
+  it('DASH 清单和 B 站一样分下载视频和下载音频，只有音频轨时只留音频按钮', () => {
     const list = document.createElement('ul')
+    const calls: string[] = []
+    bindListActions(list, () => [dash], {
+      onCopy: () => undefined,
+      onDownload: () => undefined,
+      onDashDownload(url) {
+        calls.push(`video:${url}`)
+      },
+      onDashAudio(url) {
+        calls.push(`audio:${url}`)
+      },
+    })
+
     renderList(list, [dash])
-    expect([...list.querySelectorAll('button')].map((button) => button.textContent)).toEqual(['复制', '下载'])
-    expect(list.querySelector('[data-action="dash-download"]')?.textContent).toBe('下载')
-    expect(list.querySelector('[data-action="bilibili-with-audio"]')).toBeNull()
+    expect([...list.querySelectorAll('button')].map((button) => button.textContent)).toEqual([
+      '复制',
+      '下载视频',
+      '下载音频',
+    ])
+    list.querySelector<HTMLButtonElement>('[data-action="dash-download"]')?.click()
+    list.querySelector<HTMLButtonElement>('[data-action="dash-audio"]')?.click()
+    expect(calls).toEqual([`video:${dash.url}`, `audio:${dash.url}`])
+
+    renderList(list, [dash], undefined, undefined, undefined, {
+      [dash.url]: {
+        phase: 'complete',
+        message: '已完成',
+        completed: 1,
+        total: 1,
+        updatedAt: 1,
+        hasVideo: false,
+        hasAudio: true,
+      },
+    })
+    expect([...list.querySelectorAll('button')].map((button) => button.textContent)).toEqual(['复制', '下载音频'])
+    expect(list.querySelector('[data-action="dash-download"]')).toBeNull()
+
+    renderList(list, [dash], undefined, undefined, undefined, {
+      [dash.url]: {
+        phase: 'complete',
+        message: '已完成',
+        completed: 1,
+        total: 1,
+        updatedAt: 2,
+        hasVideo: true,
+        hasAudio: false,
+      },
+    })
+    expect([...list.querySelectorAll('button')].map((button) => button.textContent)).toEqual(['复制', '下载视频'])
+    expect(list.querySelector('[data-action="dash-audio"]')).toBeNull()
+    expect(list.querySelector('.note')?.textContent).toContain('没找到音频，下载的视频没有声音')
+  })
+
+  it('DASH 的下载音频也能先选音轨，选择结果记在任务里', () => {
+    const list = document.createElement('ul')
+    const starts: string[] = []
+    bindListActions(list, () => [dash], {
+      onCopy: () => undefined,
+      onDownload: () => undefined,
+      onDashStart(_url, representationId) {
+        starts.push(representationId)
+      },
+    })
+    renderList(list, [dash], undefined, undefined, undefined, {
+      [dash.url]: {
+        phase: 'picking',
+        message: '请选择清晰度',
+        completed: 0,
+        total: 0,
+        updatedAt: 1,
+        audioOnly: true,
+        hasVideo: true,
+        hasAudio: true,
+        variants: [
+          { url: 'audio-main', label: '128 kbps', bandwidth: 128000, separateAudio: false },
+          { url: 'audio-low', label: '64 kbps', bandwidth: 64000, separateAudio: false },
+        ],
+      },
+    })
+    expect(list.querySelector('select')?.value).toBe('audio-main')
+    expect(list.querySelector('[data-action="dash-download"]')).toBeNull()
+    expect(list.querySelector('[data-action="dash-audio"]')).toBeNull()
+    list.querySelector<HTMLButtonElement>('[data-action="dash-start"]')?.click()
+    expect(starts).toEqual(['audio-main'])
+  })
+})
+
+describe('页面说明和失败重试', () => {
+  it('页面标题优先，没有标题时用主机名', () => {
+    expect(pageTitleText({ title: '示例视频页', url: 'https://example.com/a' })).toBe('示例视频页')
+    expect(pageTitleText({ title: '   ', url: 'https://example.com/a/b?x=1' })).toBe('example.com')
+    expect(pageTitleText({ url: '不是完整地址' })).toBe('当前页面')
+    expect(pageTitleText({})).toBe('当前页面')
+  })
+
+  it('普通直链失败后出现重试按钮，点击只重试这一条', () => {
+    const other = item({ url: 'https://cdn.example/b.mp4', kind: 'video', ext: 'mp4' })
+    const items = [video, other]
+    const list = document.createElement('ul')
+    const retried: string[] = []
+    renderList(list, items, {
+      [video.url]: { phase: 'failed', message: '服务器拒绝访问（403）', updatedAt: 1 },
+    })
+    expect(list.querySelectorAll('[data-action="retry"]')).toHaveLength(1)
+    expect(list.querySelector('[data-action="retry"]')?.textContent).toBe('重试')
+    expect(list.querySelector('.status')?.textContent).toBe('服务器拒绝访问（403）')
+    bindListActions(list, () => items, {
+      onCopy: () => undefined,
+      onDownload: () => undefined,
+      onRetry(url) {
+        retried.push(url)
+      },
+    })
+    list.querySelector<HTMLButtonElement>('[data-action="retry"]')?.click()
+    expect(retried).toEqual([video.url])
+  })
+
+  it('HLS / DASH / B 站任务失败才显示重试，完成和取消不显示', () => {
+    const list = document.createElement('ul')
+    const hlsFailed = {
+      phase: 'failed' as const,
+      message: '服务器拒绝访问（403）',
+      completed: 0,
+      total: 1,
+      updatedAt: 1,
+    }
+    const retried: string[] = []
+    bindListActions(list, () => [hls, dash], {
+      onCopy: () => undefined,
+      onDownload: () => undefined,
+      onRetry(url) {
+        retried.push(url)
+      },
+    })
+    renderList(list, [hls, dash], undefined, { [hls.url]: hlsFailed }, undefined, {
+      [dash.url]: hlsFailed,
+    })
+    expect(list.querySelectorAll('[data-action="retry"]')).toHaveLength(2)
+    expect(list.querySelector('.status')?.textContent).toBe('服务器拒绝访问（403）')
+    list.querySelector<HTMLButtonElement>('[data-action="retry"]')?.click()
+    expect(retried).toEqual([hls.url])
+
+    renderList(list, [hls], undefined, {
+      [hls.url]: {
+        phase: 'complete',
+        message: '已完成',
+        completed: 1,
+        total: 1,
+        updatedAt: 2,
+      },
+    })
+    expect(list.querySelector('[data-action="retry"]')).toBeNull()
+
+    renderList(list, [hls], undefined, {
+      [hls.url]: {
+        phase: 'cancelled',
+        message: '下载已取消',
+        completed: 0,
+        total: 1,
+        updatedAt: 3,
+      },
+    })
+    expect(list.querySelector('[data-action="retry"]')).toBeNull()
+
+    const cancelled = { phase: 'cancelled' as const, message: '下载已取消' }
+    expect(canRetryDownload(hls, undefined, cancelled)).toBe(false)
+    expect(canRetryDownload(hls, undefined, hlsFailed)).toBe(true)
+    expect(canRetryDownload(video, { phase: 'failed' }, undefined)).toBe(true)
+    expect(canRetryDownload(video, { phase: 'complete' }, undefined)).toBe(false)
+  })
+
+  it('B 站视频条目已知总大小接近 1GB 时在说明里提前提示', () => {
+    const big = item({
+      url: 'https://cdn.example.test/example-data/big.m4s',
+      kind: 'video',
+      ext: 'm4s',
+      downloadable: false,
+      size: 950 * 1024 * 1024,
+      bilibili: { role: 'video', label: 'B站视频 1080P' },
+    })
+    const list = document.createElement('ul')
+    renderList(list, [big])
+    expect(list.querySelector('.note')?.textContent).toContain(LARGE_MERGE_WARNING)
   })
 })
 

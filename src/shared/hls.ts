@@ -1,7 +1,8 @@
 /**
  * HLS 清单解析。不访问 chrome，也不发请求。
  *
- * 只接受点播（有 EXT-X-ENDLIST）。
+ * 点播（有 EXT-X-ENDLIST）返回 media，直播媒体清单（没有 EXT-X-ENDLIST）返回 live。
+ * 直播也记下目标时长和每片的 media sequence，供录制时按序号去重。
  * 标准 AES-128（METHOD=AES-128、KEYFORMAT 缺省或 identity、密钥是 http(s)）可以解析。
  * 每个分片记下自己的密钥地址和 IV。IV 有属性就用属性，没有就用 media sequence 的大端 16 字节。
  * 密钥中途换成新的 EXT-X-KEY 时，后面的分片用新的密钥和 IV。METHOD=NONE 之后的分片不再加密。
@@ -12,6 +13,7 @@
  */
 
 import { formatBytes } from './format'
+import { largeMergeWarning } from './size-warning'
 
 /** 下载进内存的字节上限。超过就拒绝，避免把扩展页面撑满。 */
 export const HLS_HARD_BYTE_LIMIT = 2 * 1024 * 1024 * 1024
@@ -34,6 +36,21 @@ export const HLS_TEXT = {
   notPlaylist: '这不是有效的 HLS 清单',
   badPlaylistUrl: '只支持 http 或 https 清单',
   live: '这是直播流（没有 EXT-X-ENDLIST），暂不支持下载',
+  liveHint: '这是直播流，点「录制直播」开始录制',
+  liveNotLive: '这不是直播流（清单里有 EXT-X-ENDLIST），请用「下载」',
+  liveMap: '直播清单带初始化段（EXT-X-MAP），暂不支持录制这种 fMP4 直播',
+  liveEmpty: '还没有录到分片，没有保存文件',
+  liveStarting: '正在开始录制…',
+  liveStopAndSave: '正在停止并保存…',
+  liveSaved: '录制已保存',
+  liveEnded: '直播已结束（清单出现 EXT-X-ENDLIST），已自动停止并保存',
+  liveSizeLimit: '已录大小达到 1GB 上限，已自动停止并保存',
+  liveStalled: '连续 30 秒没有新分片，已自动停止并保存',
+  liveManifestFailed: '清单连续请求失败，已自动停止并保存',
+  liveSegmentFailed: '分片下载失败，已停止录制并保存已有内容',
+  liveKeyFailed: '获取解密密钥失败，已停止录制并保存已有内容',
+  liveDecryptFailed: '解密失败，已停止录制并保存已有内容',
+  liveInitFailed: '初始化段下载失败，已停止录制并保存已有内容',
   sampleAes: '清单使用了 SAMPLE-AES，不支持这种加密',
   keyFormat: '密钥格式不是 identity，不支持这种加密',
   drm: '清单含有 DRM（Widevine、PlayReady 或 FairPlay），不支持',
@@ -167,6 +184,8 @@ export interface HlsSegment {
   url: string
   duration?: number
   aes128?: HlsAes128
+  /** 这一片的 EXT-X-MEDIA-SEQUENCE。直播录制靠它去重。 */
+  sequence?: number
 }
 
 export interface HlsMedia {
@@ -182,9 +201,18 @@ export interface HlsMedia {
   aes128: boolean
 }
 
+/** 没有 EXT-X-ENDLIST 的媒体清单。字段和点播一样，另外带轮询所需的信息。 */
+export interface HlsLiveMedia extends HlsMedia {
+  /** EXT-X-TARGETDURATION。缺省时按 2 秒处理。 */
+  targetDuration: number
+  /** 这一份滚动窗口第一片的 media sequence。 */
+  mediaSequence: number
+}
+
 export type HlsPlaylist =
   | { ok: true; kind: 'master'; variants: HlsVariant[] }
   | { ok: true; kind: 'media'; media: HlsMedia }
+  | { ok: true; kind: 'live'; live: HlsLiveMedia }
   | { ok: false; error: string }
 
 export function isHttpUrl(value: string): boolean {
@@ -276,10 +304,14 @@ export function assessHlsSize(input: {
     }
   }
 
-  const warning = joinWarnings([
-    estimatedBytes !== undefined && estimatedBytes >= HLS_WARN_BYTE_LIMIT
+  // 接近合并上限时用更明确的提醒，不再重复一遍「占用较多内存」。
+  const sizeWarning =
+    largeMergeWarning(estimatedBytes) ??
+    (estimatedBytes !== undefined && estimatedBytes >= HLS_WARN_BYTE_LIMIT
       ? hlsWarnBytesText(estimatedBytes)
-      : undefined,
+      : undefined)
+  const warning = joinWarnings([
+    sizeWarning,
     input.segmentCount >= HLS_WARN_SEGMENT_COUNT ? hlsWarnCountText(input.segmentCount) : undefined,
   ])
   if (warning) return { ok: true, warning, estimatedBytes }
@@ -562,13 +594,14 @@ function parseMedia(lines: string[], playlistUrl: string): HlsPlaylist {
   let pending: PendingSegment | undefined
   let mediaSequence = 0
   let sawMediaSequence = false
+  let targetDuration = 2
   let currentKey: AppliedKey = { method: 'NONE' }
 
   const pushUri = (raw: string): string | undefined => {
     if (raw.includes('{$')) return HLS_TEXT.variables
     const url = resolveHttp(playlistUrl, raw)
     if (!url) return HLS_TEXT.badUrl
-    const segment: HlsSegment = { url }
+    const segment: HlsSegment = { url, sequence: mediaSequence }
     if (pending?.duration !== undefined) {
       segment.duration = pending.duration
       durationSum += pending.duration
@@ -629,6 +662,11 @@ function parseMedia(lines: string[], playlistUrl: string): HlsPlaylist {
       sawMediaSequence = true
       continue
     }
+    if (tag.name === 'EXT-X-TARGETDURATION') {
+      const seconds = Number(tag.rest.trim())
+      if (Number.isFinite(seconds) && seconds > 0) targetDuration = seconds
+      continue
+    }
     if (tag.name === 'EXTINF') {
       const comma = tag.rest.indexOf(',')
       const rawDuration = (comma === -1 ? tag.rest : tag.rest.slice(0, comma)).trim()
@@ -642,8 +680,7 @@ function parseMedia(lines: string[], playlistUrl: string): HlsPlaylist {
   }
 
   if (pending) return fail(HLS_TEXT.missingUri)
-  if (!sawEndlist) return fail(HLS_TEXT.live)
-  if (segments.length === 0) return fail(HLS_TEXT.empty)
+  if (sawEndlist && segments.length === 0) return fail(HLS_TEXT.empty)
   const aes128 = segments.some((segment) => segment.aes128 !== undefined)
   if (!initUrl && segments.some((segment) => looksLikeFmp4(segment.url))) return fail(HLS_TEXT.fmp4NoMap)
   if (aes128 && initUrl) return fail(HLS_TEXT.aesMap)
@@ -656,5 +693,13 @@ function parseMedia(lines: string[], playlistUrl: string): HlsPlaylist {
     aes128,
   }
   if (initUrl) media.initUrl = initUrl
+  if (!sawEndlist) {
+    const live: HlsLiveMedia = {
+      ...media,
+      targetDuration,
+      mediaSequence: segments[0]?.sequence ?? mediaSequence,
+    }
+    return { ok: true, kind: 'live', live }
+  }
   return { ok: true, kind: 'media', media }
 }

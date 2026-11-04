@@ -21,6 +21,10 @@ export const MESSAGE_TYPE = {
   HLS_DOWNLOAD: 'HLS_DOWNLOAD',
   HLS_CANCEL: 'HLS_CANCEL',
   HLS_SYNC: 'HLS_SYNC',
+  HLS_LIVE_INSPECT: 'HLS_LIVE_INSPECT',
+  HLS_LIVE_START: 'HLS_LIVE_START',
+  HLS_LIVE_STOP: 'HLS_LIVE_STOP',
+  HLS_LIVE_CANCEL: 'HLS_LIVE_CANCEL',
   DASH_INSPECT: 'DASH_INSPECT',
   DASH_DOWNLOAD: 'DASH_DOWNLOAD',
   DASH_CANCEL: 'DASH_CANCEL',
@@ -96,6 +100,33 @@ export interface HlsSyncMessage {
   type: typeof MESSAGE_TYPE.HLS_SYNC
 }
 
+/** popup → background。检查一条 HLS 是不是直播，是主清单时返回可选清晰度。 */
+export interface HlsLiveInspectMessage {
+  type: typeof MESSAGE_TYPE.HLS_LIVE_INSPECT
+  url: string
+  tabId?: number
+}
+
+/** popup → background。开始录制直播。mediaUrl 是选中的媒体清单。 */
+export interface HlsLiveStartMessage {
+  type: typeof MESSAGE_TYPE.HLS_LIVE_START
+  url: string
+  mediaUrl: string
+  tabId?: number
+}
+
+/** popup → background。停止轮询并保存已经录到的内容。 */
+export interface HlsLiveStopMessage {
+  type: typeof MESSAGE_TYPE.HLS_LIVE_STOP
+  url: string
+}
+
+/** popup → background。放弃录制，不保存。 */
+export interface HlsLiveCancelMessage {
+  type: typeof MESSAGE_TYPE.HLS_LIVE_CANCEL
+  url: string
+}
+
 /** popup → background。读 mpd：多清晰度时返回选项，只有一条时直接开始下载。 */
 export interface DashInspectMessage {
   type: typeof MESSAGE_TYPE.DASH_INSPECT
@@ -103,6 +134,8 @@ export interface DashInspectMessage {
   tabId?: number
   /** 勾选「分开保存视频和音频」时为 true。缺省表示合并。 */
   separate?: boolean
+  /** 只检查并选择音频轨。缺省表示视频（带声音）。 */
+  audioOnly?: boolean
 }
 
 /** popup → background。representationId 是 Representation 的 id，不是分片地址。 */
@@ -113,6 +146,8 @@ export interface DashDownloadMessage {
   tabId?: number
   /** 勾选「分开保存视频和音频」时为 true。缺省表示合并。 */
   separate?: boolean
+  /** 只下载音频轨。为 true 时 representationId 必须是音频轨的 id。 */
+  audioOnly?: boolean
 }
 
 export interface DashCancelMessage {
@@ -158,6 +193,10 @@ export type ExtensionMessage =
   | HlsDownloadMessage
   | HlsCancelMessage
   | HlsSyncMessage
+  | HlsLiveInspectMessage
+  | HlsLiveStartMessage
+  | HlsLiveStopMessage
+  | HlsLiveCancelMessage
   | DashInspectMessage
   | DashDownloadMessage
   | DashCancelMessage
@@ -254,11 +293,34 @@ export function isHlsSyncMessage(value: unknown): value is HlsSyncMessage {
   return isRecord(value) && value.type === MESSAGE_TYPE.HLS_SYNC
 }
 
+export function isHlsLiveInspectMessage(value: unknown): value is HlsLiveInspectMessage {
+  if (!isRecord(value) || value.type !== MESSAGE_TYPE.HLS_LIVE_INSPECT) return false
+  if (!isHttpishUrl(value.url)) return false
+  if (value.tabId !== undefined && !isTabId(value.tabId)) return false
+  return true
+}
+
+export function isHlsLiveStartMessage(value: unknown): value is HlsLiveStartMessage {
+  if (!isRecord(value) || value.type !== MESSAGE_TYPE.HLS_LIVE_START) return false
+  if (!isHttpishUrl(value.url) || !isHttpishUrl(value.mediaUrl)) return false
+  if (value.tabId !== undefined && !isTabId(value.tabId)) return false
+  return true
+}
+
+export function isHlsLiveStopMessage(value: unknown): value is HlsLiveStopMessage {
+  return isRecord(value) && value.type === MESSAGE_TYPE.HLS_LIVE_STOP && isHttpishUrl(value.url)
+}
+
+export function isHlsLiveCancelMessage(value: unknown): value is HlsLiveCancelMessage {
+  return isRecord(value) && value.type === MESSAGE_TYPE.HLS_LIVE_CANCEL && isHttpishUrl(value.url)
+}
+
 export function isDashInspectMessage(value: unknown): value is DashInspectMessage {
   if (!isRecord(value) || value.type !== MESSAGE_TYPE.DASH_INSPECT) return false
   if (!isHttpishUrl(value.url)) return false
   if (value.tabId !== undefined && !isTabId(value.tabId)) return false
   if (value.separate !== undefined && typeof value.separate !== 'boolean') return false
+  if (value.audioOnly !== undefined && typeof value.audioOnly !== 'boolean') return false
   return true
 }
 
@@ -267,6 +329,7 @@ export function isDashDownloadMessage(value: unknown): value is DashDownloadMess
   if (!isHttpishUrl(value.url) || !isHttpishUrl(value.representationId)) return false
   if (value.tabId !== undefined && !isTabId(value.tabId)) return false
   if (value.separate !== undefined && typeof value.separate !== 'boolean') return false
+  if (value.audioOnly !== undefined && typeof value.audioOnly !== 'boolean') return false
   return true
 }
 
@@ -306,6 +369,10 @@ export function isExtensionMessage(value: unknown): value is ExtensionMessage {
     isHlsDownloadMessage(value) ||
     isHlsCancelMessage(value) ||
     isHlsSyncMessage(value) ||
+    isHlsLiveInspectMessage(value) ||
+    isHlsLiveStartMessage(value) ||
+    isHlsLiveStopMessage(value) ||
+    isHlsLiveCancelMessage(value) ||
     isDashInspectMessage(value) ||
     isDashDownloadMessage(value) ||
     isDashCancelMessage(value) ||

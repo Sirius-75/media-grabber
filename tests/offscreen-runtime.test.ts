@@ -5,6 +5,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DASH_JOB_STORAGE_KEY } from '../src/shared/dash-job'
+import { DASH_TEXT } from '../src/shared/dash-text'
 import { HLS_TEXT } from '../src/shared/hls'
 import { HLS_JOB_STORAGE_KEY } from '../src/shared/hls-job'
 import { OFFSCREEN_BRIDGE } from '../src/shared/offscreen-bridge'
@@ -19,6 +20,9 @@ const MASTER = 'https://cdn.example/master.m3u8'
 const MEDIA = 'https://cdn.example/high.m3u8'
 const PICK = 'https://origin.example/dash/pick.mpd'
 const AV = 'https://origin.example/dash/av.mpd'
+const VIDEO_ONLY = 'https://origin.example/dash/video-only.mpd'
+const AUDIO_ONLY = 'https://origin.example/dash/audio-only.mpd'
+const AUDIO_AV = 'https://origin.example/dash/audio-av.mpd'
 
 const MASTER_TEXT = [
   '#EXTM3U',
@@ -61,11 +65,51 @@ const AV_MPD = `<?xml version="1.0"?>
   </Period>
 </MPD>`
 
+const VIDEO_ONLY_MPD = `<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="4" initialization="vinit.mp4" media="v$Number$.m4s"/>
+      <Representation id="v" bandwidth="2000000" width="640" height="360"/>
+    </AdaptationSet>
+  </Period>
+</MPD>`
+
+const AUDIO_ONLY_MPD = `<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
+  <Period>
+    <AdaptationSet mimeType="audio/mp4">
+      <SegmentTemplate timescale="1" duration="4" initialization="ainit.mp4" media="a$Number$.m4s"/>
+      <Representation id="a" bandwidth="128000"/>
+    </AdaptationSet>
+  </Period>
+</MPD>`
+
+const AUDIO_AV_MPD = `<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="4" initialization="vinit.mp4" media="v$Number$.m4s"/>
+      <Representation id="v" bandwidth="2000000" width="1280" height="720"/>
+    </AdaptationSet>
+    <AdaptationSet mimeType="audio/mp4">
+      <SegmentTemplate timescale="1" duration="4" initialization="ainit.mp4" media="a$Number$.m4s"/>
+      <Representation id="a" bandwidth="128000"/>
+      <Representation id="a-main" bandwidth="192000">
+        <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`
+
 const PLAYLISTS = new Map<string, string>([
   [MASTER, MASTER_TEXT],
   [MEDIA, MEDIA_TEXT],
   [PICK, PICK_MPD],
   [AV, AV_MPD],
+  [VIDEO_ONLY, VIDEO_ONLY_MPD],
+  [AUDIO_ONLY, AUDIO_ONLY_MPD],
+  [AUDIO_AV, AUDIO_AV_MPD],
 ])
 
 interface Sent {
@@ -74,7 +118,16 @@ interface Sent {
   key?: string
   filename?: string
   url?: string
-  record?: { phase?: string; message?: string; warning?: string; epoch?: number; variants?: unknown[] }
+  record?: {
+    phase?: string
+    message?: string
+    warning?: string
+    epoch?: number
+    variants?: unknown[]
+    hasVideo?: boolean
+    hasAudio?: boolean
+    audioOnly?: boolean
+  }
 }
 
 type Listener = (
@@ -294,7 +347,7 @@ describe('offscreen 只使用 chrome.runtime', () => {
     const saved = harness.sent.find((message) => message.type === OFFSCREEN_BRIDGE.SAVE_BLOB)
     expect(saved).toMatchObject({
       url: harness.created[0],
-      filename: 'Big Buck Bunny-1.mp4',
+      filename: 'Big Buck Bunny-1080P.mp4',
     })
     expect(Object.keys(saved ?? {}).sort()).toEqual(['filename', 'type', 'url'])
     const jobWrites = writes(harness.sent, HLS_JOB_STORAGE_KEY)
@@ -325,12 +378,101 @@ describe('offscreen 只使用 chrome.runtime', () => {
     await waitFor(() => harness.sent.filter((message) => message.type === OFFSCREEN_BRIDGE.SAVE_BLOB).length >= 2)
 
     const saved = harness.sent.filter((message) => message.type === OFFSCREEN_BRIDGE.SAVE_BLOB)
-    expect(saved.map((message) => message.filename)).toEqual(['Big Buck Bunny-2.mp4', 'Big Buck Bunny-2.m4a'])
+    expect(saved.map((message) => message.filename)).toEqual(['Big Buck Bunny-720P.mp4', 'Big Buck Bunny-音频.m4a'])
     expect(saved.map((message) => message.url)).toEqual(harness.created)
     expect(harness.revokeDelays).toEqual([60_000, 60_000])
     expect(harness.revoked).toEqual([])
     expect(writes(harness.sent, DASH_JOB_STORAGE_KEY).some((message) => message.record?.phase === 'complete')).toBe(true)
     expect(writes(harness.sent, HLS_JOB_STORAGE_KEY)).toEqual([])
+  })
+
+  it('DASH audioOnly 只下音轨，不碰视频', async () => {
+    const harness = await setup()
+    const inspected = await harness.dispatch({
+      type: 'DASH_OFFSCREEN_INSPECT',
+      playlistUrl: AUDIO_AV,
+      audioOnly: true,
+    })
+    expect(inspected).toMatchObject({ ok: true, kind: 'master', hasVideo: true, hasAudio: true })
+    const picking = writes(harness.sent, DASH_JOB_STORAGE_KEY).find((message) => message.record?.phase === 'picking')
+    expect(picking?.record).toMatchObject({ hasVideo: true, hasAudio: true, audioOnly: true })
+    expect(picking?.record?.variants).toHaveLength(2)
+
+    const started = await harness.dispatch({
+      type: 'DASH_OFFSCREEN_DOWNLOAD',
+      playlistUrl: AUDIO_AV,
+      representationId: 'a-main',
+      audioOnly: true,
+      title: 'Big Buck Bunny',
+    })
+    expect(started).toEqual({ ok: true })
+    await waitFor(() =>
+      writes(harness.sent, DASH_JOB_STORAGE_KEY).some((message) => message.record?.phase === 'complete'),
+    )
+
+    const saved = harness.sent.filter((message) => message.type === OFFSCREEN_BRIDGE.SAVE_BLOB)
+    expect(saved.map((message) => message.filename)).toEqual(['Big Buck Bunny-音频.m4a'])
+    expect(harness.fetches.some((call) => call.url.includes('v1.m4s'))).toBe(false)
+    const done = writes(harness.sent, DASH_JOB_STORAGE_KEY).find((message) => message.record?.phase === 'complete')
+    expect(done?.record).toMatchObject({ hasVideo: true, hasAudio: true, audioOnly: true })
+  })
+
+  it('DASH 清单没有音频轨时视频照常下载，并记下 hasAudio=false', async () => {
+    const harness = await setup()
+    const inspected = await harness.dispatch({ type: 'DASH_OFFSCREEN_INSPECT', playlistUrl: VIDEO_ONLY })
+    expect(inspected).toMatchObject({ ok: true, kind: 'media', hasVideo: true, hasAudio: false })
+
+    const started = await harness.dispatch({
+      type: 'DASH_OFFSCREEN_DOWNLOAD',
+      playlistUrl: VIDEO_ONLY,
+      title: 'Only Video',
+    })
+    expect(started).toEqual({ ok: true })
+    await waitFor(() =>
+      writes(harness.sent, DASH_JOB_STORAGE_KEY).some((message) => message.record?.phase === 'complete'),
+    )
+
+    const saved = harness.sent.filter((message) => message.type === OFFSCREEN_BRIDGE.SAVE_BLOB)
+    expect(saved.map((message) => message.filename)).toEqual(['Only Video-360P.mp4'])
+    const done = writes(harness.sent, DASH_JOB_STORAGE_KEY).find((message) => message.record?.phase === 'complete')
+    expect(done?.record).toMatchObject({ hasVideo: true, hasAudio: false })
+  })
+
+  it('DASH 清单只有音频轨时，下载视频会说明原因，下载音频能保存', async () => {
+    const harness = await setup()
+    const failed = await harness.dispatch({ type: 'DASH_OFFSCREEN_DOWNLOAD', playlistUrl: AUDIO_ONLY })
+    expect(failed).toEqual({ ok: true })
+    await waitFor(() =>
+      writes(harness.sent, DASH_JOB_STORAGE_KEY).some((message) => message.record?.phase === 'failed'),
+    )
+    const failure = writes(harness.sent, DASH_JOB_STORAGE_KEY).find((message) => message.record?.phase === 'failed')
+    expect(failure?.record?.message).toBe(DASH_TEXT.noVideoTrack)
+    expect(failure?.record).toMatchObject({ hasVideo: false, hasAudio: true })
+
+    const started = await harness.dispatch({
+      type: 'DASH_OFFSCREEN_DOWNLOAD',
+      playlistUrl: AUDIO_ONLY,
+      title: 'Only Audio',
+      audioOnly: true,
+    })
+    expect(started).toEqual({ ok: true })
+    await waitFor(() => harness.sent.filter((message) => message.type === OFFSCREEN_BRIDGE.SAVE_BLOB).length >= 1)
+    const saved = harness.sent.filter((message) => message.type === OFFSCREEN_BRIDGE.SAVE_BLOB)
+    expect(saved.map((message) => message.filename)).toEqual(['Only Audio-音频.m4a'])
+    expect(writes(harness.sent, DASH_JOB_STORAGE_KEY).some((message) => message.record?.phase === 'complete')).toBe(true)
+  })
+
+  it('DASH 音频任务先选音轨时，选择器只列音轨', async () => {
+    const harness = await setup()
+    const inspected = await harness.dispatch({
+      type: 'DASH_OFFSCREEN_INSPECT',
+      playlistUrl: AUDIO_AV,
+      audioOnly: true,
+    })
+    expect(inspected).toMatchObject({ ok: true, kind: 'master' })
+    if (typeof inspected !== 'object' || inspected === null || !('variants' in inspected)) return
+    const variants = inspected.variants as Array<{ url: string }>
+    expect(variants.map((variant) => variant.url)).toEqual(['a-main', 'a'])
   })
 
   it('消息发不出去时，检查清单返回内部错误并留下原始异常', async () => {
@@ -398,7 +540,7 @@ describe('offscreen 只使用 chrome.runtime', () => {
     )
 
     const saved = harness.sent.find((message) => message.type === OFFSCREEN_BRIDGE.SAVE_BLOB)
-    expect(saved).toMatchObject({ filename: '加密测试-3.mp4' })
+    expect(saved).toMatchObject({ filename: '加密测试.mp4' })
     const keyHex = [...key].map((part) => part.toString(16).padStart(2, '0')).join('')
     const dumped = JSON.stringify(harness.sent)
     expect(dumped).not.toContain(keyHex)

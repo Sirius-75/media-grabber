@@ -8,6 +8,7 @@
 import type { BilibiliRole } from './types'
 import { BILIBILI_TEXT, bilibiliStatusText } from './bilibili'
 import { HLS_HARD_BYTE_LIMIT, HLS_TEXT, HLS_WARN_BYTE_LIMIT, hlsWarnBytesText } from './hls'
+import { largeMergeWarning } from './size-warning'
 import type { FetchLike } from './hls-fetch'
 
 /** 达到这个大小才尝试并行分段。再小的文件一条连接就够。 */
@@ -344,7 +345,7 @@ function finishFile(
   const decided = decideSaveExt(role, type, bytes)
   const file: BilibiliFetchedFile = { bytes, ext: decided.ext, mime: decided.mime }
   if (decided.note) file.note = decided.note
-  if (size >= warnBytes) file.warning = hlsWarnBytesText(size)
+  if (size >= warnBytes) file.warning = largeMergeWarning(size) ?? hlsWarnBytesText(size)
   return { ok: true, file }
 }
 

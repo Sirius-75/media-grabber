@@ -13,10 +13,11 @@
  */
 
 import { describeInterruptReason } from '../shared/interrupt-reason'
-import { buildDownloadFilename } from '../shared/filename'
+import { buildDownloadFilename, formatQualitySuffix } from '../shared/filename'
 import { decryptDownloadedParts, loadAes128Keys } from '../shared/hls-aes'
 import { downloadSegmentsInOrder } from '../shared/hls-download'
 import { fetchPlaylistText, fetchSegmentBytes } from '../shared/hls-fetch'
+import { HlsLiveRecorder, liveRecordingText } from '../shared/hls-live'
 import { planHlsSave, type HlsSavePlan } from '../shared/hls-remux'
 import { transmuxTsSegment } from '../shared/hls-remux-mux'
 import {
@@ -30,6 +31,7 @@ import {
 import { BILIBILI_JOB_STORAGE_KEY, BILIBILI_OFFSCREEN, BILIBILI_PORT } from '../shared/bilibili'
 import type { BilibiliDownloadFile } from '../shared/bilibili'
 import { DASH_JOB_STORAGE_KEY } from '../shared/dash-job'
+import { MAX_CONCURRENT_JOBS } from '../shared/download-queue'
 import { HLS_JOB_STORAGE_KEY, toVariantChoice, type HlsJobRecord } from '../shared/hls-job'
 import type { BilibiliRole } from '../shared/types'
 import { abortDashInspect, inspectDash, startDashDownload, type DashHost } from './dash-task'
@@ -38,7 +40,7 @@ import { inspectFailureMessage, settleJob } from './failure'
 import { cancelStoredJob, putJob, saveBlobFile } from './runtime-bridge'
 
 const ROLE = 'offscreen'
-const HLS_CANCEL_PHASES = ['downloading', 'inspecting', 'picking', 'remuxing'] as const
+const HLS_CANCEL_PHASES = ['downloading', 'inspecting', 'picking', 'recording', 'remuxing'] as const
 const DASH_CANCEL_PHASES = ['downloading', 'inspecting', 'picking', 'merging'] as const
 
 interface DownloadRequest {
@@ -54,7 +56,10 @@ interface ActiveDownload {
   epoch: number
 }
 
-let active: ActiveDownload | undefined
+const activeJobs = new Map<string, ActiveDownload>()
+const liveRecorders = new Map<string, HlsLiveRecorder>()
+/** 用户在任务刚开始、录制器还没建好时点了「停止并保存」。 */
+const pendingLiveStops = new Set<string>()
 let inspecting: { key: string; controller: AbortController } | undefined
 let writeQueue: Promise<void> = Promise.resolve()
 let epochCounter = 0
@@ -78,7 +83,23 @@ function enqueue(task: () => Promise<void>): Promise<void> {
 
 function activate(key: string, controller: AbortController): void {
   epochCounter += 1
-  active = { key, controller, epoch: epochCounter }
+  activeJobs.set(key, { key, controller, epoch: epochCounter })
+}
+
+function activeFor(controller: AbortController): ActiveDownload | undefined {
+  for (const job of activeJobs.values()) {
+    if (job.controller === controller) return job
+  }
+  return undefined
+}
+
+function isCurrent(controller: AbortController): boolean {
+  return activeFor(controller) !== undefined
+}
+
+function clearActive(controller: AbortController): void {
+  const job = activeFor(controller)
+  if (job) activeJobs.delete(job.key)
 }
 
 function writeJob(
@@ -89,8 +110,9 @@ function writeJob(
 ): Promise<void> {
   return enqueue(async () => {
     // 同一个清单被重新开始之后，旧任务晚到的进度不能把新任务盖掉。
-    if (controller && active?.controller !== controller) return
-    const next = controller && active ? { ...record, epoch: active.epoch } : record
+    const current = controller ? activeFor(controller) : undefined
+    if (controller && !current) return
+    const next = controller && current ? { ...record, epoch: current.epoch } : record
     await putJob(storageKey, key, next)
   })
 }
@@ -117,11 +139,14 @@ function job(input: Omit<HlsJobRecord, 'updatedAt' | 'epoch'>): HlsJobRecord {
   }
   if (input.warning) record.warning = input.warning
   if (input.variants) record.variants = input.variants
+  if (input.live !== undefined) record.live = input.live
+  if (input.recordedMs !== undefined) record.recordedMs = input.recordedMs
+  if (input.recordedBytes !== undefined) record.recordedBytes = input.recordedBytes
   return record
 }
 
 function stillCurrent(controller: AbortController): boolean {
-  return active?.controller === controller
+  return isCurrent(controller)
 }
 
 async function loadPlaylist(url: string, signal: AbortSignal): Promise<HlsPlaylist> {
@@ -131,7 +156,7 @@ async function loadPlaylist(url: string, signal: AbortSignal): Promise<HlsPlayli
 }
 
 async function inspect(playlistUrl: string): Promise<unknown> {
-  if (active?.key === playlistUrl) return { ok: false, error: HLS_TEXT.busy }
+  if (activeJobs.has(playlistUrl)) return { ok: false, error: HLS_TEXT.busy }
   inspecting?.controller.abort()
   const controller = new AbortController()
   inspecting = { key: playlistUrl, controller }
@@ -154,6 +179,25 @@ async function inspect(playlistUrl: string): Promise<unknown> {
         }),
       )
       return { ok: true, kind: 'master', variants }
+    }
+    if (parsed.kind === 'live') {
+      await writeJob(
+        playlistUrl,
+        job({
+          phase: 'picking',
+          message: HLS_TEXT.liveHint,
+          completed: 0,
+          total: 0,
+          live: true,
+          warning: parsed.live.aes128 ? HLS_TEXT.aes128Note : undefined,
+        }),
+      )
+      return {
+        ok: true,
+        kind: 'live',
+        targetDuration: parsed.live.targetDuration,
+        warning: parsed.live.aes128 ? HLS_TEXT.aes128Note : undefined,
+      }
     }
     const total = parsed.media.segmentCount + (parsed.media.initUrl ? 1 : 0)
     const assessment = mediaDownloadWarning({
@@ -195,6 +239,67 @@ async function inspect(playlistUrl: string): Promise<unknown> {
   }
 }
 
+async function inspectLive(playlistUrl: string): Promise<unknown> {
+  if (activeJobs.has(playlistUrl)) return { ok: false, error: HLS_TEXT.busy }
+  inspecting?.controller.abort()
+  const controller = new AbortController()
+  inspecting = { key: playlistUrl, controller }
+  try {
+    const parsed = await loadPlaylist(playlistUrl, controller.signal)
+    if (!parsed.ok) {
+      await writeJob(playlistUrl, job({ phase: 'failed', message: parsed.error, completed: 0, total: 0 }))
+      return { ok: false, error: parsed.error }
+    }
+    if (parsed.kind === 'master') {
+      const variants = parsed.variants.map(toVariantChoice)
+      await writeJob(
+        playlistUrl,
+        job({
+          phase: 'picking',
+          message: HLS_TEXT.picking,
+          completed: 0,
+          total: 0,
+          variants,
+          live: true,
+        }),
+      )
+      return { ok: true, kind: 'master', variants, live: true }
+    }
+    if (parsed.kind === 'media') {
+      await writeJob(
+        playlistUrl,
+        job({ phase: 'failed', message: HLS_TEXT.liveNotLive, completed: 0, total: 0 }),
+      )
+      return { ok: false, error: HLS_TEXT.liveNotLive }
+    }
+    const warning = parsed.live.aes128 ? HLS_TEXT.aes128Note : undefined
+    await writeJob(
+      playlistUrl,
+      job({
+        phase: 'picking',
+        message: HLS_TEXT.liveHint,
+        completed: 0,
+        total: 0,
+        live: true,
+        warning,
+      }),
+    )
+    const response: { ok: true; kind: 'live'; targetDuration: number; warning?: string } = {
+      ok: true,
+      kind: 'live',
+      targetDuration: parsed.live.targetDuration,
+    }
+    if (warning) response.warning = warning
+    return response
+  } catch (error) {
+    if (controller.signal.aborted) return { ok: false, error: HLS_TEXT.cancelled }
+    warn('读取直播清单失败', error)
+    return { ok: false, error: inspectFailureMessage(error) }
+  } finally {
+    if (inspecting?.controller === controller) inspecting = undefined
+  }
+}
+
 function readDownload(value: Record<string, unknown>): DownloadRequest | undefined {
   if (typeof value.playlistUrl !== 'string' || value.playlistUrl.trim() === '') return undefined
   if (typeof value.mediaUrl !== 'string' || value.mediaUrl.trim() === '') return undefined
@@ -208,8 +313,9 @@ function readDownload(value: Record<string, unknown>): DownloadRequest | undefin
 }
 
 function acceptDownload(request: DownloadRequest): { ok: true } | { ok: false; error: string } {
-  if (active && active.key !== request.playlistUrl) return { ok: false, error: HLS_TEXT.busy }
-  if (active?.key === request.playlistUrl) active.controller.abort()
+  const existing = activeJobs.get(request.playlistUrl)
+  if (existing) existing.controller.abort()
+  if (activeJobs.size >= MAX_CONCURRENT_JOBS && !existing) return { ok: false, error: HLS_TEXT.busy }
   const controller = new AbortController()
   // 先占住，避免同步检查把正在开始的任务当成已经中断。
   activate(request.playlistUrl, controller)
@@ -228,6 +334,7 @@ async function runDownload(request: DownloadRequest, controller: AbortController
   const key = request.playlistUrl
   try {
     let bandwidth: number | undefined
+    let quality: string | undefined
     let separateAudio = false
     if (request.mediaUrl !== request.playlistUrl) {
       const master = await loadPlaylist(request.playlistUrl, signal)
@@ -246,6 +353,7 @@ async function runDownload(request: DownloadRequest, controller: AbortController
         return
       }
       bandwidth = variant.bandwidth > 0 ? variant.bandwidth : undefined
+      quality = formatQualitySuffix({ height: variant.height, bandwidth: variant.bandwidth })
       separateAudio = variant.separateAudio
     }
 
@@ -436,7 +544,7 @@ async function runDownload(request: DownloadRequest, controller: AbortController
       title: request.title,
       url: key,
       ext: planned.ext,
-      index: request.index,
+      quality,
     })
     const saved = await saveBlobFile(planned.parts, planned.mime, filename)
     if (!stillCurrent(controller)) return
@@ -468,8 +576,285 @@ async function runDownload(request: DownloadRequest, controller: AbortController
     const message = describeInterruptReason(error instanceof Error ? error.message : undefined)
     await settleJob(() => failJob(key, controller, message))
   } finally {
-    if (active?.controller === controller) active = undefined
+    clearActive(controller)
   }
+}
+
+interface LiveDownloadRequest {
+  playlistUrl: string
+  mediaUrl: string
+  title?: string
+  index?: number
+}
+
+function readLiveDownload(value: Record<string, unknown>): LiveDownloadRequest | undefined {
+  if (typeof value.playlistUrl !== 'string' || value.playlistUrl.trim() === '') return undefined
+  if (typeof value.mediaUrl !== 'string' || value.mediaUrl.trim() === '') return undefined
+  const request: LiveDownloadRequest = {
+    playlistUrl: value.playlistUrl.trim(),
+    mediaUrl: value.mediaUrl.trim(),
+  }
+  if (typeof value.title === 'string' && value.title.trim()) request.title = value.title
+  if (typeof value.index === 'number' && Number.isInteger(value.index) && value.index >= 1) request.index = value.index
+  return request
+}
+
+function startHlsLive(request: LiveDownloadRequest): { ok: true } | { ok: false; error: string } {
+  const existing = activeJobs.get(request.playlistUrl)
+  if (existing) existing.controller.abort()
+  if (activeJobs.size >= MAX_CONCURRENT_JOBS && !existing) return { ok: false, error: HLS_TEXT.busy }
+  const controller = new AbortController()
+  activate(request.playlistUrl, controller)
+  void runHlsLive(request, controller).catch((error: unknown) => {
+    warn('HLS 直播录制任务异常', error)
+  })
+  return { ok: true }
+}
+
+async function runHlsLive(request: LiveDownloadRequest, controller: AbortController): Promise<void> {
+  const key = request.playlistUrl
+  const signal = controller.signal
+  let quality: string | undefined
+  let warning: string | undefined
+  try {
+    if (request.mediaUrl !== request.playlistUrl) {
+      const master = await loadPlaylist(request.playlistUrl, signal)
+      if (!stillCurrent(controller)) return
+      if (!master.ok) {
+        await failJob(key, controller, master.error)
+        return
+      }
+      if (master.kind !== 'master') {
+        await failJob(key, controller, HLS_TEXT.nestedMaster)
+        return
+      }
+      const variant = master.variants.find((item) => item.url === request.mediaUrl)
+      if (!variant) {
+        await failJob(key, controller, HLS_TEXT.variantMissing)
+        return
+      }
+      quality = formatQualitySuffix({ height: variant.height, bandwidth: variant.bandwidth })
+      if (variant.separateAudio) warning = HLS_TEXT.separateAudio
+    }
+
+    const recorder = new HlsLiveRecorder({
+      playlistUrl: request.mediaUrl,
+      cancelSignal: signal,
+      onUpdate(update) {
+        if (!stillCurrent(controller)) return
+        writeJobLater(
+          key,
+          job({
+            phase: 'recording',
+            message: liveRecordingText(update),
+            completed: update.bytes,
+            total: 0,
+            warning,
+            live: true,
+            recordedMs: update.elapsedMs,
+            recordedBytes: update.bytes,
+          }),
+          controller,
+          HLS_JOB_STORAGE_KEY,
+          '写入录制进度失败',
+        )
+      },
+    })
+    liveRecorders.set(key, recorder)
+    if (pendingLiveStops.delete(key)) recorder.stop()
+    await writeJob(
+      key,
+      job({
+        phase: 'recording',
+        message: liveRecordingText({ elapsedMs: 0, bytes: 0 }),
+        completed: 0,
+        total: 0,
+        warning,
+        live: true,
+        recordedMs: 0,
+        recordedBytes: 0,
+      }),
+      controller,
+    )
+    if (!stillCurrent(controller)) return
+
+    const recorded = await recorder.run()
+    if (!stillCurrent(controller)) return
+    if (signal.aborted) {
+      await writeJob(
+        key,
+        job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0, live: true }),
+        controller,
+      )
+      return
+    }
+    if (!recorded.ok) {
+      await writeJob(
+        key,
+        job({
+          phase: recorded.cancelled ? 'cancelled' : 'failed',
+          message: recorded.error,
+          completed: 0,
+          total: 0,
+          warning,
+          live: true,
+        }),
+        controller,
+      )
+      return
+    }
+    if (recorded.parts.length === 0) {
+      await failJob(key, controller, HLS_TEXT.liveEmpty)
+      return
+    }
+
+    let planned: HlsSavePlan
+    try {
+      if (recorded.container === 'mp4') {
+        planned = {
+          ok: true,
+          ext: 'mp4',
+          mime: 'video/mp4',
+          parts: recorded.parts,
+          message: HLS_TEXT.complete,
+        }
+      } else {
+        planned = await planHlsSave({
+          container: 'ts',
+          parts: recorded.parts,
+          transmux: transmuxTsSegment,
+          signal,
+          yield: () =>
+            new Promise((resolve) => {
+              setTimeout(resolve, 0)
+            }),
+          onRemuxStart: () =>
+            writeJob(
+              key,
+              job({
+                phase: 'remuxing',
+                message: HLS_TEXT.liveStopAndSave,
+                completed: recorded.segmentCount,
+                total: recorded.segmentCount,
+                warning,
+                live: true,
+                recordedMs: Math.round(recorded.durationSeconds * 1000),
+                recordedBytes: recorded.bytes,
+              }),
+              controller,
+            ).catch((error: unknown) => {
+              warn('写入直播转封装状态失败', error)
+            }),
+        })
+      }
+    } catch (error) {
+      if (!stillCurrent(controller)) return
+      if (signal.aborted) {
+        await writeJob(
+          key,
+          job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0, live: true }),
+          controller,
+        )
+        return
+      }
+      warn('直播转封装失败，改为保存 TS', error)
+      planned = {
+        ok: true,
+        ext: 'ts',
+        mime: 'video/mp2t',
+        parts: recorded.parts,
+        message: HLS_TEXT.remuxFallback,
+      }
+    }
+    if (!stillCurrent(controller)) return
+    if (!planned.ok) {
+      await writeJob(
+        key,
+        job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0, live: true }),
+        controller,
+      )
+      return
+    }
+    if (signal.aborted) {
+      await writeJob(
+        key,
+        job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0, live: true }),
+        controller,
+      )
+      return
+    }
+
+    const filename = buildDownloadFilename({
+      title: request.title,
+      url: key,
+      ext: planned.ext,
+      quality,
+    })
+    const saved = await saveBlobFile(planned.parts, planned.mime, filename)
+    if (!stillCurrent(controller)) return
+    if (!saved.ok) {
+      await settleJob(() => failJob(key, controller, saved.error, recorded.segmentCount))
+      return
+    }
+    const message =
+      planned.message === HLS_TEXT.complete
+        ? `${recorded.message}（.${planned.ext}）`
+        : `${recorded.message}。${planned.message}`
+    console.info('[media-grabber] HLS 直播已保存', saved.downloadId, filename)
+    await writeJob(
+      key,
+      job({
+        phase: 'complete',
+        message,
+        completed: recorded.segmentCount,
+        total: recorded.segmentCount,
+        warning,
+        live: true,
+        recordedMs: Math.round(recorded.durationSeconds * 1000),
+        recordedBytes: recorded.bytes,
+      }),
+      controller,
+    )
+  } catch (error) {
+    if (!stillCurrent(controller)) return
+    if (signal.aborted) {
+      await settleJob(() =>
+        writeJob(key, job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0, live: true }), controller),
+      )
+      return
+    }
+    warn('HLS 直播录制失败', error)
+    const message = describeInterruptReason(error instanceof Error ? error.message : undefined)
+    await settleJob(() => failJob(key, controller, message))
+  } finally {
+    const recorder = liveRecorders.get(key)
+    if (recorder && activeJobs.get(key)?.controller === controller) liveRecorders.delete(key)
+    pendingLiveStops.delete(key)
+    clearActive(controller)
+  }
+}
+
+function stopHlsLive(key: string): { ok: true } {
+  const recorder = liveRecorders.get(key)
+  if (recorder) recorder.stop()
+  else if (activeJobs.has(key)) pendingLiveStops.add(key)
+  return { ok: true }
+}
+
+function cancelHlsLive(key: string): { ok: true } {
+  const current = activeJobs.get(key)
+  if (current) {
+    current.controller.abort()
+    return { ok: true }
+  }
+  void enqueue(async () => {
+    try {
+      await cancelStoredJob(HLS_JOB_STORAGE_KEY, key, HLS_CANCEL_PHASES)
+    } catch (error) {
+      warn('取消直播录制状态失败', error)
+    }
+  })
+  return { ok: true }
 }
 
 const BILIBILI_ROLES = new Set<BilibiliRole>(['video', 'audio', 'unknown', 'file'])
@@ -480,7 +865,9 @@ function readBilibiliFiles(value: unknown): BilibiliDownloadFile[] | undefined {
   for (const entry of value) {
     if (!isRecord(entry) || typeof entry.url !== 'string' || entry.url.trim() === '') return undefined
     if (typeof entry.role !== 'string' || !BILIBILI_ROLES.has(entry.role as BilibiliRole)) return undefined
-    files.push({ url: entry.url.trim(), role: entry.role as BilibiliRole })
+    const file: BilibiliDownloadFile = { url: entry.url.trim(), role: entry.role as BilibiliRole }
+    if (typeof entry.quality === 'string' && entry.quality.trim()) file.quality = entry.quality.trim()
+    files.push(file)
   }
   return files
 }
@@ -531,10 +918,10 @@ function ensureBilibiliPort(): void {
 
 const bilibiliHost: BilibiliHost = {
   still(controller) {
-    return active?.controller === controller
+    return isCurrent(controller)
   },
   clear(controller) {
-    if (active?.controller === controller) active = undefined
+    clearActive(controller)
   },
   write(key, record, controller) {
     return writeJob(key, record, controller, BILIBILI_JOB_STORAGE_KEY)
@@ -548,28 +935,32 @@ function startBilibiliDownload(request: {
   index?: number
   separate?: boolean
 }): { ok: true } | { ok: false; error: string } {
-  if (active && active.key !== request.key) return { ok: false, error: HLS_TEXT.busy }
-  if (active?.key === request.key) active.controller.abort()
+  const existing = activeJobs.get(request.key)
+  if (existing) existing.controller.abort()
+  if (activeJobs.size >= MAX_CONCURRENT_JOBS && !existing) return { ok: false, error: HLS_TEXT.busy }
   const controller = new AbortController()
   activate(request.key, controller)
   ensureBilibiliPort()
   void runBilibiliDownload(request, controller, bilibiliHost)
     .then((result) => {
       // 同一条又开始了新的下载时，旧任务的结束不能把新任务报成完成。
-      if (active && active.controller !== controller) return undefined
+      const current = activeJobs.get(request.key)
+      if (current && current.controller !== controller) return undefined
       return reportBilibili(request.key, result)
     })
     .catch((error: unknown) => {
       warn('B站下载任务异常', error)
-      if (active && active.controller !== controller) return undefined
+      const current = activeJobs.get(request.key)
+      if (current && current.controller !== controller) return undefined
       return reportBilibili(request.key, { ok: false, error: HLS_TEXT.offscreen })
     })
   return { ok: true }
 }
 
 function cancelBilibili(key: string): { ok: true } {
-  if (active?.key === key) {
-    active.controller.abort()
+  const current = activeJobs.get(key)
+  if (current) {
+    current.controller.abort()
     return { ok: true }
   }
   void enqueue(async () => {
@@ -584,22 +975,23 @@ function cancelBilibili(key: string): { ok: true } {
 
 const dashHost: DashHost = {
   isActive(key) {
-    return active?.key === key
+    return activeJobs.has(key)
   },
   busyOther(key) {
-    return active && active.key !== key ? HLS_TEXT.busy : undefined
+    if (activeJobs.has(key)) return undefined
+    return activeJobs.size >= MAX_CONCURRENT_JOBS ? HLS_TEXT.busy : undefined
   },
   abortSame(key) {
-    if (active?.key === key) active.controller.abort()
+    activeJobs.get(key)?.controller.abort()
   },
   setActive(key, controller) {
     activate(key, controller)
   },
   still(controller) {
-    return active?.controller === controller
+    return isCurrent(controller)
   },
   clear(controller) {
-    if (active?.controller === controller) active = undefined
+    clearActive(controller)
   },
   write(key, record, controller) {
     return writeJob(key, record, controller, DASH_JOB_STORAGE_KEY)
@@ -607,8 +999,9 @@ const dashHost: DashHost = {
 }
 
 function cancelJob(playlistUrl: string): { ok: true } {
-  if (active?.key === playlistUrl) {
-    active.controller.abort()
+  const current = activeJobs.get(playlistUrl)
+  if (current) {
+    current.controller.abort()
     return { ok: true }
   }
   if (inspecting?.key === playlistUrl) inspecting.controller.abort()
@@ -624,8 +1017,9 @@ function cancelJob(playlistUrl: string): { ok: true } {
 
 function cancelDash(playlistUrl: string): { ok: true } {
   abortDashInspect(playlistUrl)
-  if (active?.key === playlistUrl) {
-    active.controller.abort()
+  const current = activeJobs.get(playlistUrl)
+  if (current) {
+    current.controller.abort()
     return { ok: true }
   }
   void enqueue(async () => {
@@ -640,9 +1034,16 @@ function cancelDash(playlistUrl: string): { ok: true } {
 
 function readDashRequest(
   value: Record<string, unknown>,
-): { playlistUrl: string; representationId?: string; title?: string; index?: number; separate?: boolean } | undefined {
+): { playlistUrl: string; representationId?: string; title?: string; index?: number; separate?: boolean; audioOnly?: boolean } | undefined {
   if (typeof value.playlistUrl !== 'string' || value.playlistUrl.trim() === '') return undefined
-  const request: { playlistUrl: string; representationId?: string; title?: string; index?: number; separate?: boolean } = {
+  const request: {
+    playlistUrl: string
+    representationId?: string
+    title?: string
+    index?: number
+    separate?: boolean
+    audioOnly?: boolean
+  } = {
     playlistUrl: value.playlistUrl.trim(),
   }
   if (typeof value.representationId === 'string' && value.representationId.trim()) {
@@ -651,6 +1052,7 @@ function readDashRequest(
   if (typeof value.title === 'string' && value.title.trim()) request.title = value.title
   if (typeof value.index === 'number' && Number.isInteger(value.index) && value.index >= 1) request.index = value.index
   if (value.separate === true) request.separate = true
+  if (value.audioOnly === true) request.audioOnly = true
   return request
 }
 
@@ -682,12 +1084,47 @@ export function startOffscreen(): void {
       sendResponse(cancelJob(message.playlistUrl))
       return undefined
     }
+    if (message.type === 'HLS_OFFSCREEN_LIVE_INSPECT') {
+      if (typeof message.playlistUrl !== 'string' || message.playlistUrl.trim() === '') {
+        sendResponse({ ok: false, error: HLS_TEXT.badPlaylistUrl })
+        return undefined
+      }
+      void inspectLive(message.playlistUrl.trim()).then(sendResponse, (error: unknown) => {
+        warn('检查直播清单失败', error)
+        sendResponse({ ok: false, error: inspectFailureMessage(error) })
+      })
+      return true
+    }
+    if (message.type === 'HLS_OFFSCREEN_LIVE_START') {
+      const request = readLiveDownload(message)
+      if (!request) {
+        sendResponse({ ok: false, error: '下载请求无效' })
+        return undefined
+      }
+      sendResponse(startHlsLive(request))
+      return undefined
+    }
+    if (message.type === 'HLS_OFFSCREEN_LIVE_STOP') {
+      if (typeof message.playlistUrl !== 'string') return undefined
+      sendResponse(stopHlsLive(message.playlistUrl))
+      return undefined
+    }
+    if (message.type === 'HLS_OFFSCREEN_LIVE_CANCEL') {
+      if (typeof message.playlistUrl !== 'string') return undefined
+      sendResponse(cancelHlsLive(message.playlistUrl))
+      return undefined
+    }
     if (message.type === 'DASH_OFFSCREEN_INSPECT') {
       if (typeof message.playlistUrl !== 'string' || message.playlistUrl.trim() === '') {
         sendResponse({ ok: false, error: HLS_TEXT.badPlaylistUrl })
         return undefined
       }
-      void inspectDash(message.playlistUrl.trim(), dashHost, message.separate === true).then(sendResponse, (error: unknown) => {
+      void inspectDash(
+        message.playlistUrl.trim(),
+        dashHost,
+        message.separate === true,
+        message.audioOnly === true,
+      ).then(sendResponse, (error: unknown) => {
         warn('检查 DASH 清单失败', error)
         sendResponse({ ok: false, error: inspectFailureMessage(error) })
       })
@@ -722,8 +1159,12 @@ export function startOffscreen(): void {
       return undefined
     }
     if (message.type === 'DASH_OFFSCREEN_SYNC' || message.type === 'HLS_OFFSCREEN_SYNC') {
-      const response: { ok: true; activeKey?: string } = { ok: true }
-      if (active?.key) response.activeKey = active.key
+      const response: { ok: true; activeKey?: string; activeKeys: string[] } = {
+        ok: true,
+        activeKeys: [...activeJobs.keys()],
+      }
+      const first = activeJobs.keys().next()
+      if (!first.done) response.activeKey = first.value
       sendResponse(response)
       return undefined
     }

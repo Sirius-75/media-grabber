@@ -14,6 +14,7 @@ import {
   bilibiliM4sItem,
   canonicalBilibiliM4sUrl,
   parsePlayinfoScripts,
+  bilibiliQualitySuffix,
   planBilibiliFiles,
   videoTrackLabel,
 } from '../src/shared/bilibili'
@@ -249,13 +250,13 @@ describe('下载文件选择（示例数据）', () => {
     expect(planBilibiliFiles([video, quiet, loud], video.url, true)).toEqual({
       ok: true,
       files: [
-        { url: video.url, role: 'video' },
+        { url: video.url, role: 'video', quality: '1080P' },
         { url: loud.url, role: 'audio' },
       ],
     })
     expect(planBilibiliFiles([video], video.url, false)).toEqual({
       ok: true,
-      files: [{ url: video.url, role: 'video' }],
+      files: [{ url: video.url, role: 'video', quality: '1080P' }],
     })
   })
 
@@ -284,6 +285,15 @@ describe('下载文件选择（示例数据）', () => {
       ok: false,
       error: BILIBILI_TEXT.noAudioTrack,
     })
+  })
+
+  it('清晰度后缀优先用 height，没有 height 时从标签里取', () => {
+    expect(bilibiliQualitySuffix(video.bilibili)).toBe('1080P')
+    expect(bilibiliQualitySuffix({ role: 'video', label: 'B站视频 高清 720P · AVC' })).toBe('720P')
+    expect(bilibiliQualitySuffix({ role: 'video', label: 'B站视频 4K', height: 2160 })).toBe('2160P')
+    expect(bilibiliQualitySuffix({ role: 'video', label: 'B站视频 4K' })).toBe('4K')
+    expect(bilibiliQualitySuffix({ role: 'video', label: 'B站视频' })).toBeUndefined()
+    expect(bilibiliQualitySuffix({ role: 'audio', label: 'B站音频 192kbps' })).toBeUndefined()
   })
 
   it('页面轨和直链的说明分开写', () => {

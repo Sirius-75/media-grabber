@@ -5,6 +5,7 @@
  */
 
 import { normalizeUrl } from './classify'
+import { formatQualitySuffix } from './filename'
 import type { BilibiliMeta, BilibiliRole, MediaItem, MediaItemDraft } from './types'
 import { BILIBILI_ROLES } from './types'
 
@@ -492,6 +493,32 @@ export function bilibiliM4sItem(details: BilibiliSniffInput, now = Date.now()): 
 export interface BilibiliDownloadFile {
   url: string
   role: BilibiliRole
+  /** 视频清晰度后缀，例如 1080P。音频由下载任务固定写成「音频」。 */
+  quality?: string
+}
+
+/**
+ * 文件名里的清晰度后缀。
+ * 优先用条目里已有的 height；没有 height 时从「高清 1080P」这类标签里取。
+ */
+export function bilibiliQualitySuffix(meta: BilibiliMeta | undefined): string | undefined {
+  if (!meta || meta.role === 'audio') return undefined
+  const fromSize = formatQualitySuffix({ height: meta.height })
+  if (fromSize) return fromSize
+  const match = /\b(\d{3,4}P(?:\d{1,2})?|[48]K)\b/i.exec(meta.label)
+  return match?.[1]?.toUpperCase()
+}
+
+function downloadFileOf(
+  item: { url: string; bilibili?: BilibiliMeta },
+  role: BilibiliRole,
+): BilibiliDownloadFile {
+  const file: BilibiliDownloadFile = { url: item.url, role }
+  if (role !== 'audio') {
+    const quality = bilibiliQualitySuffix(item.bilibili)
+    if (quality) file.quality = quality
+  }
+  return file
 }
 
 /** 组合下载时，选带宽最高的一条音频。没有带宽就留列表里的第一条。 */
@@ -520,18 +547,20 @@ export function planBilibiliFiles(
   if (audioOnly) {
     const primary = items.find((item) => item.url === url)
     if (primary?.bilibili?.role === 'audio') {
-      return { ok: true, files: [{ url, role: 'audio' }] }
+      return { ok: true, files: [downloadFileOf(primary, 'audio')] }
     }
     const audioUrl = highestBilibiliAudioUrl(items)
     if (!audioUrl) return { ok: false, error: BILIBILI_TEXT.noAudioTrack }
-    return { ok: true, files: [{ url: audioUrl, role: 'audio' }] }
+    const audio = items.find((item) => item.url === audioUrl)
+    return { ok: true, files: [downloadFileOf(audio ?? { url: audioUrl }, 'audio')] }
   }
   const primary = items.find((item) => item.url === url)
   const role = primary?.bilibili?.role ?? 'unknown'
-  const files: BilibiliDownloadFile[] = [{ url, role }]
+  const files: BilibiliDownloadFile[] = [downloadFileOf(primary ?? { url }, role)]
   if (!withAudio || role === 'audio') return { ok: true, files }
   const audioUrl = highestBilibiliAudioUrl(items, url)
   if (!audioUrl) return { ok: false, error: BILIBILI_TEXT.noAudio }
-  files.push({ url: audioUrl, role: 'audio' })
+  const audio = items.find((item) => item.url === audioUrl)
+  files.push(downloadFileOf(audio ?? { url: audioUrl }, 'audio'))
   return { ok: true, files }
 }

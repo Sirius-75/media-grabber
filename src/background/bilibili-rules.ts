@@ -40,8 +40,9 @@ export function finishBilibiliDownload(jobKey: string, result: RefererDownloadRe
 }
 
 /** 同步任务时调用。offscreen 已经不在下这一条，就把规则清掉。 */
-export function noteBilibiliOffscreen(activeKey: string | undefined): void {
-  session.onOffscreenActiveKey(activeKey)
+export function noteBilibiliOffscreen(activeKeys: string | readonly string[] | undefined): void {
+  if (typeof activeKeys === 'string') session.onOffscreenActiveKeys([activeKeys])
+  else session.onOffscreenActiveKeys(activeKeys)
 }
 
 export function clearBilibiliRefererOnStartup(): Promise<number[]> {
@@ -54,6 +55,7 @@ export function clearBilibiliRefererOnStartup(): Promise<number[]> {
 export function runBilibiliWithReferer(
   input: { pageUrl: string; mediaUrls: readonly string[]; jobKey: string },
   download: () => Promise<RefererDownloadResult>,
+  options: { allowConcurrent?: boolean } = {},
 ): Promise<RefererDownloadResult> {
-  return session.run(input, download)
+  return session.run(input, download, options)
 }

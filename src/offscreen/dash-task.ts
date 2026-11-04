@@ -8,7 +8,7 @@
 import { describeDashFetchFailure, parseMpd, planDashDownload } from '../shared/dash'
 import { DASH_TEXT } from '../shared/dash-text'
 import { FMP4_MERGE_TEXT } from '../shared/fmp4-merge'
-import { buildDownloadFilename } from '../shared/filename'
+import { buildDownloadFilename, formatQualitySuffix } from '../shared/filename'
 import { downloadSegmentsInOrder } from '../shared/hls-download'
 import { fetchPlaylistText, fetchSegmentBytes } from '../shared/hls-fetch'
 import { HLS_TEXT, describePlaylistStatus, hlsProgressText } from '../shared/hls'
@@ -24,6 +24,8 @@ export interface DashRequest {
   index?: number
   /** 用户勾选了分开保存。默认合并。 */
   separate?: boolean
+  /** 只下载音频轨。 */
+  audioOnly?: boolean
 }
 
 export interface DashHost {
@@ -48,6 +50,12 @@ function warn(message: string, error: unknown): void {
   console.warn(`[media-grabber] ${message}`, error)
 }
 
+/** 音频固定写「音频」；视频优先用高度，没有高度时用带宽。 */
+function qualityOf(file: { kind: 'video' | 'audio'; height?: number; bandwidth?: number }): string | undefined {
+  if (file.kind === 'audio') return '音频'
+  return formatQualitySuffix({ height: file.height, bandwidth: file.bandwidth })
+}
+
 function job(input: Omit<HlsJobRecord, 'updatedAt'>): HlsJobRecord {
   const record: HlsJobRecord = {
     phase: input.phase,
@@ -58,7 +66,22 @@ function job(input: Omit<HlsJobRecord, 'updatedAt'>): HlsJobRecord {
   }
   if (input.warning) record.warning = input.warning
   if (input.variants) record.variants = input.variants
+  if (input.hasVideo !== undefined) record.hasVideo = input.hasVideo
+  if (input.hasAudio !== undefined) record.hasAudio = input.hasAudio
+  if (input.audioOnly !== undefined) record.audioOnly = input.audioOnly
   return record
+}
+
+/** DASH 任务的轨道信息和模式，每次写进度都带上，避免被后台的整条记录覆盖掉。 */
+function trackInfo(
+  manifest: { videos: unknown[]; audios: unknown[] },
+  audioOnly: boolean,
+): { hasVideo: boolean; hasAudio: boolean; audioOnly: boolean } {
+  return {
+    hasVideo: manifest.videos.length > 0,
+    hasAudio: manifest.audios.length > 0,
+    audioOnly,
+  }
 }
 
 export function abortDashInspect(playlistUrl: string): void {
@@ -71,7 +94,12 @@ async function loadManifest(url: string, signal: AbortSignal) {
   return parseMpd(fetched.text, url)
 }
 
-export async function inspectDash(playlistUrl: string, host: DashHost, separate = false): Promise<unknown> {
+export async function inspectDash(
+  playlistUrl: string,
+  host: DashHost,
+  separate = false,
+  audioOnly = false,
+): Promise<unknown> {
   if (host.isActive(playlistUrl)) return { ok: false, error: HLS_TEXT.busy }
   inspecting?.controller.abort()
   const controller = new AbortController()
@@ -82,12 +110,14 @@ export async function inspectDash(playlistUrl: string, host: DashHost, separate 
       await host.write(playlistUrl, job({ phase: 'failed', message: parsed.error, completed: 0, total: 0 }))
       return { ok: false, error: parsed.error }
     }
-    const plan = planDashDownload(parsed)
+    const info = trackInfo(parsed, audioOnly)
+    const plan = planDashDownload(parsed, undefined, audioOnly)
     if (!plan.ok) {
-      await host.write(playlistUrl, job({ phase: 'failed', message: plan.error, completed: 0, total: 0 }))
-      return { ok: false, error: plan.error }
+      await host.write(playlistUrl, job({ phase: 'failed', message: plan.error, completed: 0, total: 0, ...info }))
+      return { ok: false, error: plan.error, ...info }
     }
     if (plan.files.length === 0) {
+      const warning = chosenWarning(plan.warning, separate)
       await host.write(
         playlistUrl,
         job({
@@ -95,26 +125,45 @@ export async function inspectDash(playlistUrl: string, host: DashHost, separate 
           message: DASH_TEXT.picking,
           completed: 0,
           total: 0,
-          warning: chosenWarning(plan.warning, separate),
+          warning,
           variants: plan.variants,
+          ...info,
         }),
       )
-      const response: { ok: true; kind: 'master'; variants: typeof plan.variants; warning?: string } = {
+      const response: {
+        ok: true
+        kind: 'master'
+        variants: typeof plan.variants
+        warning?: string
+        hasVideo: boolean
+        hasAudio: boolean
+      } = {
         ok: true,
         kind: 'master',
         variants: plan.variants,
+        hasVideo: info.hasVideo,
+        hasAudio: info.hasAudio,
       }
-      const warning = chosenWarning(plan.warning, separate)
       if (warning) response.warning = warning
       return response
     }
-    const response: { ok: true; kind: 'media'; total: number; container: 'mp4'; warning?: string } = {
+    const warning = chosenWarning(plan.warning, separate)
+    const response: {
+      ok: true
+      kind: 'media'
+      total: number
+      container: 'mp4'
+      warning?: string
+      hasVideo: boolean
+      hasAudio: boolean
+    } = {
       ok: true,
       kind: 'media',
       total: plan.total,
       container: 'mp4',
+      hasVideo: info.hasVideo,
+      hasAudio: info.hasAudio,
     }
-    const warning = chosenWarning(plan.warning, separate)
     if (warning) response.warning = warning
     return response
   } catch (error) {
@@ -136,6 +185,12 @@ export async function inspectDash(playlistUrl: string, host: DashHost, separate 
 async function runDash(request: DashRequest, controller: AbortController, host: DashHost): Promise<void> {
   const signal = controller.signal
   const key = request.playlistUrl
+  let info: Pick<HlsJobRecord, 'hasVideo' | 'hasAudio' | 'audioOnly'> = {
+    audioOnly: request.audioOnly === true,
+  }
+  /** 写任务时始终带上已知的轨道信息，避免被后续进度覆盖掉。 */
+  const writeRecord = (input: Omit<HlsJobRecord, 'updatedAt' | 'hasVideo' | 'hasAudio' | 'audioOnly'>) =>
+    job({ ...info, ...input })
   try {
     const parsed = await loadManifest(key, signal)
     if (!host.still(controller)) return
@@ -143,14 +198,15 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
       await host.write(key, job({ phase: 'failed', message: parsed.error, completed: 0, total: 0 }), controller)
       return
     }
-    const plan = planDashDownload(parsed, request.representationId)
+    info = trackInfo(parsed, request.audioOnly === true)
+    const plan = planDashDownload(parsed, request.representationId, request.audioOnly === true)
     if (!host.still(controller)) return
     if (!plan.ok) {
-      await host.write(key, job({ phase: 'failed', message: plan.error, completed: 0, total: 0 }), controller)
+      await host.write(key, job({ phase: 'failed', message: plan.error, completed: 0, total: 0, ...info }), controller)
       return
     }
     if (plan.files.length === 0) {
-      await host.write(key, job({ phase: 'failed', message: DASH_TEXT.picking, completed: 0, total: 0 }), controller)
+      await host.write(key, job({ phase: 'failed', message: DASH_TEXT.picking, completed: 0, total: 0, ...info }), controller)
       return
     }
     const warning = chosenWarning(plan.warning, request.separate === true)
@@ -161,7 +217,7 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
     let completed = 0
     await host.write(
       key,
-      job({
+      writeRecord({
         phase: 'downloading',
         message: hlsProgressText(0, total),
         completed: 0,
@@ -183,7 +239,7 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
         void host
           .write(
             key,
-            job({
+            writeRecord({
               phase: 'downloading',
               message: hlsProgressText(progress.completed, progress.total),
               completed: progress.completed,
@@ -206,7 +262,7 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
           : describeDashFetchFailure(plan, result.index ?? 0, result.status)
       await host.write(
         key,
-        job({
+        writeRecord({
           phase: result.cancelled ? 'cancelled' : 'failed',
           message,
           completed,
@@ -235,7 +291,7 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
         writeMerging: () =>
           host.write(
             key,
-            job({
+            writeRecord({
               phase: 'merging',
               message: FMP4_MERGE_TEXT.merging,
               completed: total,
@@ -248,21 +304,36 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
         video: {
           parts: videoGroup.parts,
           mime: videoGroup.file.mime,
-          filename: buildDownloadFilename({ title: request.title, url: key, ext: videoGroup.file.ext, index: request.index }),
+          filename: buildDownloadFilename({
+            title: request.title,
+            url: key,
+            ext: videoGroup.file.ext,
+            quality: qualityOf(videoGroup.file),
+          }),
         },
         audio: {
           parts: audioGroup.parts,
           mime: audioGroup.file.mime,
-          filename: buildDownloadFilename({ title: request.title, url: key, ext: audioGroup.file.ext, index: request.index }),
+          filename: buildDownloadFilename({
+            title: request.title,
+            url: key,
+            ext: audioGroup.file.ext,
+            quality: qualityOf(audioGroup.file),
+          }),
         },
-        mergedFilename: buildDownloadFilename({ title: request.title, url: key, ext: 'mp4', index: request.index }),
+        mergedFilename: buildDownloadFilename({
+          title: request.title,
+          url: key,
+          ext: 'mp4',
+          quality: qualityOf(videoGroup.file),
+        }),
       })
       if (!host.still(controller)) return
       if (!outcome.ok) {
         await settleJob(() =>
           host.write(
             key,
-            job({
+            writeRecord({
               phase: 'cancelled' in outcome && outcome.cancelled ? 'cancelled' : 'failed',
               message: outcome.error,
               completed: total,
@@ -276,7 +347,7 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
       }
       await host.write(
         key,
-        job({ phase: 'complete', message: outcome.message, completed: total, total, warning: plan.warning }),
+        writeRecord({ phase: 'complete', message: outcome.message, completed: total, total, warning: plan.warning }),
         controller,
       )
       return
@@ -288,14 +359,14 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
         title: request.title,
         url: key,
         ext: group.file.ext,
-        index: request.index,
+        quality: qualityOf(group.file),
       })
       const savedFile = await saveBlobFile(group.parts, group.file.mime, filename)
       if (!host.still(controller)) return
       if (!savedFile.ok) {
         const message = saved.length > 0 ? DASH_TEXT.audioSaveFailed : savedFile.error
         await settleJob(() =>
-          host.write(key, job({ phase: 'failed', message, completed: total, total, warning: plan.warning }), controller),
+          host.write(key, writeRecord({ phase: 'failed', message, completed: total, total, warning: plan.warning }), controller),
         )
         return
       }
@@ -307,7 +378,7 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
       request.separate === true && plan.separateAudio ? FMP4_MERGE_TEXT.separateChosen : HLS_TEXT.complete
     await host.write(
       key,
-      job({
+      writeRecord({
         phase: 'complete',
         message: separateMessage,
         completed: total,
@@ -320,7 +391,7 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
     if (!host.still(controller)) return
     if (signal.aborted) {
       await settleJob(() =>
-        host.write(key, job({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0 }), controller),
+        host.write(key, writeRecord({ phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0 }), controller),
       )
       return
     }
@@ -328,7 +399,7 @@ async function runDash(request: DashRequest, controller: AbortController, host: 
     await settleJob(() =>
       host.write(
         key,
-        job({ phase: 'failed', message: inspectFailureMessage(error), completed: 0, total: 0 }),
+        writeRecord({ phase: 'failed', message: inspectFailureMessage(error), completed: 0, total: 0 }),
         controller,
       ),
     )

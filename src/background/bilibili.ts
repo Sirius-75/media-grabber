@@ -4,14 +4,13 @@
  * 进度和保存文件仍走原来的 offscreen 消息。这里不改 HLS、DASH 和普通直链。
  */
 
-import { downloadContext, ensureOffscreen, relayJobSync, sendOffscreen } from './hls'
+import { downloadContext, relayJobSync, sendOffscreen } from './hls'
 import {
   clearBilibiliRefererOnStartup,
   finishBilibiliDownload,
   noteBilibiliOffscreen,
-  runBilibiliWithReferer,
-  waitForBilibiliDownload,
 } from './bilibili-rules'
+import { cancelQueuedJob, enqueueBilibiliJob } from './queue'
 import { getItems } from './store'
 import { BILIBILI_OFFSCREEN, BILIBILI_PORT, BILIBILI_TEXT, planBilibiliFiles } from '../shared/bilibili'
 import { normalizeUrl } from '../shared/classify'
@@ -43,12 +42,6 @@ async function pageUrlOf(tabId: number | undefined): Promise<string | undefined>
   }
 }
 
-function failureOf(value: unknown): { ok: false; error: string } | undefined {
-  if (!isRecord(value) || value.ok !== false) return undefined
-  if (typeof value.error !== 'string' || value.error.trim() === '') return { ok: false, error: HLS_TEXT.offscreen }
-  return { ok: false, error: value.error }
-}
-
 function doneResult(value: unknown): { ok: boolean; error?: string; cancelled?: boolean } | undefined {
   if (!isRecord(value) || value.type !== BILIBILI_OFFSCREEN.DONE) return undefined
   if (typeof value.key !== 'string' || value.key.trim() === '') return undefined
@@ -69,33 +62,14 @@ async function download(message: BilibiliDownloadMessage): Promise<unknown> {
   const planned = planBilibiliFiles(items, primary, message.withAudio === true, message.audioOnly === true)
   if (!planned.ok) return planned
   const context = await downloadContext(tabId, primary)
-  return runBilibiliWithReferer(
-    { pageUrl, mediaUrls: planned.files.map((file) => file.url), jobKey: primary },
-    async () => {
-      const pending = waitForBilibiliDownload(primary)
-      try {
-        await ensureOffscreen()
-      } catch (error) {
-        warn('打开 offscreen 失败', error)
-        finishBilibiliDownload(primary, { ok: false, error: HLS_TEXT.offscreen })
-        return pending
-      }
-      const payload: Record<string, unknown> = {
-        type: BILIBILI_OFFSCREEN.DOWNLOAD,
-        key: primary,
-        files: planned.files,
-      }
-      if (context.title) payload.title = context.title
-      if (context.index !== undefined) payload.index = context.index
-      if (message.separate === true) payload.separate = true
-      const started = await sendOffscreen(payload)
-      const failed = failureOf(started)
-      if (started === undefined || failed) {
-        finishBilibiliDownload(primary, failed ?? { ok: false, error: HLS_TEXT.offscreen })
-      }
-      return pending
-    },
-  )
+  return enqueueBilibiliJob({
+    key: primary,
+    pageUrl,
+    files: planned.files,
+    separate: message.separate === true,
+    tabId,
+    ...context,
+  })
 }
 
 function onPort(port: chrome.runtime.Port): void {
@@ -127,17 +101,22 @@ export function handleBilibiliMessage(
   }
   if (isBilibiliCancelMessage(message)) {
     const key = normalizeUrl(message.url) || message.url.trim()
-    void sendOffscreen({ type: BILIBILI_OFFSCREEN.CANCEL, key }).then(
-      (response) => {
-        if (response === undefined) noteBilibiliOffscreen(undefined)
-        sendResponse(response ?? { ok: true })
-      },
-      (error: unknown) => {
-        warn('取消 B站 下载失败', error)
-        noteBilibiliOffscreen(undefined)
-        sendResponse({ ok: false, error: HLS_TEXT.offscreen })
-      },
-    )
+    void cancelQueuedJob('bilibili', key)
+      .then((cancelled) => {
+        if (cancelled) return { ok: true }
+        return sendOffscreen({ type: BILIBILI_OFFSCREEN.CANCEL, key })
+      })
+      .then(
+        (response) => {
+          if (response === undefined) noteBilibiliOffscreen(undefined)
+          sendResponse(response ?? { ok: true })
+        },
+        (error: unknown) => {
+          warn('取消 B站 下载失败', error)
+          noteBilibiliOffscreen(undefined)
+          sendResponse({ ok: false, error: HLS_TEXT.offscreen })
+        },
+      )
     return true
   }
   if (isBilibiliSyncMessage(message)) {

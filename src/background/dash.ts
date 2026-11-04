@@ -5,6 +5,7 @@
  */
 
 import { downloadContext, ensureOffscreen, relayJobSync, sendOffscreen } from './hls'
+import { cancelQueuedJob, enqueueDashJob } from './queue'
 import { normalizeUrl } from '../shared/classify'
 import { HLS_TEXT, isHttpUrl } from '../shared/hls'
 import {
@@ -36,17 +37,17 @@ async function forwardDownload(
   representationId: string | undefined,
   tabId: number | undefined,
   separate: boolean,
+  audioOnly: boolean,
 ): Promise<unknown> {
   const context = await downloadContext(tabId, playlistUrl)
-  const message: Record<string, unknown> = {
-    type: 'DASH_OFFSCREEN_DOWNLOAD',
-    playlistUrl,
+  return enqueueDashJob({
+    key: playlistUrl,
+    representationId,
     separate,
-  }
-  if (representationId) message.representationId = representationId
-  if (context.title) message.title = context.title
-  if (context.index !== undefined) message.index = context.index
-  return sendOffscreen(message)
+    audioOnly,
+    tabId,
+    ...context,
+  })
 }
 
 async function inspect(message: DashInspectMessage): Promise<unknown> {
@@ -58,7 +59,11 @@ async function inspect(message: DashInspectMessage): Promise<unknown> {
     warn('打开 offscreen 失败', error)
     return { ok: false, error: HLS_TEXT.offscreen }
   }
-  const inspected = await sendOffscreen({ type: 'DASH_OFFSCREEN_INSPECT', playlistUrl })
+  const inspected = await sendOffscreen({
+    type: 'DASH_OFFSCREEN_INSPECT',
+    playlistUrl,
+    audioOnly: message.audioOnly === true,
+  })
   if (inspected === undefined) return { ok: false, error: HLS_TEXT.offscreen }
   if (
     typeof inspected === 'object' &&
@@ -68,7 +73,13 @@ async function inspect(message: DashInspectMessage): Promise<unknown> {
     'ok' in inspected &&
     inspected.ok === true
   ) {
-    const started = await forwardDownload(playlistUrl, undefined, message.tabId, message.separate === true)
+    const started = await forwardDownload(
+      playlistUrl,
+      undefined,
+      message.tabId,
+      message.separate === true,
+      message.audioOnly === true,
+    )
     if (started === undefined) return { ok: false, error: HLS_TEXT.offscreen }
     if (isFailure(started)) return started
   }
@@ -85,7 +96,13 @@ async function download(message: DashDownloadMessage): Promise<unknown> {
     warn('打开 offscreen 失败', error)
     return { ok: false, error: HLS_TEXT.offscreen }
   }
-  const started = await forwardDownload(playlistUrl, representationId, message.tabId, message.separate === true)
+  const started = await forwardDownload(
+    playlistUrl,
+    representationId,
+    message.tabId,
+    message.separate === true,
+    message.audioOnly === true,
+  )
   return started ?? { ok: false, error: HLS_TEXT.offscreen }
 }
 
@@ -110,13 +127,18 @@ export function handleDashMessage(
   }
   if (isDashCancelMessage(message)) {
     const playlistUrl = normalizeUrl(message.url) || message.url.trim()
-    void sendOffscreen({ type: 'DASH_OFFSCREEN_CANCEL', playlistUrl }).then(
-      (response) => sendResponse(response ?? { ok: true }),
-      (error: unknown) => {
-        warn('取消 DASH 失败', error)
-        sendResponse({ ok: false, error: HLS_TEXT.offscreen })
-      },
-    )
+    void cancelQueuedJob('dash', playlistUrl)
+      .then((cancelled) => {
+        if (cancelled) return { ok: true }
+        return sendOffscreen({ type: 'DASH_OFFSCREEN_CANCEL', playlistUrl })
+      })
+      .then(
+        (response) => sendResponse(response ?? { ok: true }),
+        (error: unknown) => {
+          warn('取消 DASH 失败', error)
+          sendResponse({ ok: false, error: HLS_TEXT.offscreen })
+        },
+      )
     return true
   }
   if (isDashSyncMessage(message)) {

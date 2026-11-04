@@ -10,6 +10,20 @@ import { BILIBILI_JOB_STORAGE_KEY, BILIBILI_TEXT } from '../shared/bilibili'
 import { normalizeUrl } from '../shared/classify'
 import { DASH_JOB_STORAGE_KEY, readDashJobMap } from '../shared/dash-job'
 import {
+  DOWNLOAD_RETRY_STORAGE_KEY,
+  readDownloadRetryMap,
+  type DownloadRetryMap,
+  type DownloadRetryPlan,
+} from '../shared/download-retry'
+import {
+  JOB_QUEUE_STORAGE_KEY,
+  emptyQueue,
+  queuePosition,
+  queuedStatusText,
+  readDownloadQueue,
+  type DownloadQueueState,
+} from '../shared/download-queue'
+import {
   DOWNLOAD_STATUS_STORAGE_KEY,
   readDownloadStatusMap,
   type DownloadStatusMap,
@@ -31,6 +45,8 @@ import {
   type DownloadMessage,
   type HlsDownloadMessage,
   type HlsInspectMessage,
+  type HlsLiveInspectMessage,
+  type HlsLiveStartMessage,
 } from '../shared/messages'
 import type { MediaItem } from '../shared/types'
 import {
@@ -38,6 +54,7 @@ import {
   downloadFeedback,
   flashButton,
   isMediaItemList,
+  pageTitleText,
   renderList,
   setRowStatus,
   statusFromDownloadResponse,
@@ -50,11 +67,14 @@ const listEl = document.querySelector('#list')
 const clearButton = document.querySelector('#clear')
 
 let tabId: number | undefined
+let pageTitle = ''
 let items: MediaItem[] = []
 let statuses: DownloadStatusMap = {}
 let jobs: HlsJobMap = {}
 let dashJobs: HlsJobMap = {}
 let bilibiliJobs: HlsJobMap = {}
+let queue: DownloadQueueState = emptyQueue()
+let retries: DownloadRetryMap = {}
 /** 用户在清晰度列表里点过的地址。DASH 里存的是 Representation id。重画时不要跳回默认项。 */
 const preferredVariant = new Map<string, string>()
 
@@ -83,17 +103,37 @@ function paint(): void {
 
   countEl.textContent = `共 ${items.length} 条`
   clearButton.disabled = tabId === undefined || items.length === 0
-  renderList(listEl, items, statuses, jobs, preferredVariant, dashJobs, bilibiliJobs)
+  paintPageTitle()
+  renderList(listEl, items, statuses, jobs, preferredVariant, dashJobs, bilibiliJobs, queue)
   const isEmpty = items.length === 0
   emptyEl.hidden = !isEmpty
   listEl.hidden = isEmpty
 }
 
-async function queryActiveTabId(): Promise<number | undefined> {
+function paintPageTitle(): void {
+  const el = document.querySelector('#page-title')
+  if (!(el instanceof HTMLElement)) return
+  el.hidden = pageTitle === ''
+  el.textContent = pageTitle
+  if (pageTitle) el.title = pageTitle
+  else el.removeAttribute('title')
+}
+
+interface ActiveTabInfo {
+  id: number
+  title?: string
+  url?: string
+}
+
+async function queryActiveTab(): Promise<ActiveTabInfo | undefined> {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
-  const id = tabs[0]?.id
+  const tab = tabs[0]
+  const id = tab?.id
   if (typeof id !== 'number' || !Number.isInteger(id) || id < 0) return undefined
-  return id
+  const info: ActiveTabInfo = { id }
+  if (typeof tab?.title === 'string') info.title = tab.title
+  if (typeof tab?.url === 'string') info.url = tab.url
+  return info
 }
 
 async function writeClipboard(text: string): Promise<boolean> {
@@ -133,6 +173,27 @@ function statusKey(url: string): string {
   return normalizeUrl(url) || url
 }
 
+/** 记下这一次的启动参数，失败后「重试」用同一份。参数不含媒体内容，只放会话存储。 */
+function rememberRetry(url: string, plan: DownloadRetryPlan): void {
+  retries = { ...retries, [statusKey(url)]: plan }
+  void persistRetries()
+}
+
+async function persistRetries(): Promise<void> {
+  try {
+    await chrome.storage.session.set({ [DOWNLOAD_RETRY_STORAGE_KEY]: retries })
+  } catch {
+    // 会话存储写失败时，本次弹窗仍能用内存里的参数重试。
+  }
+}
+
+/** 这条地址是否还在队列里等。返回从 1 开始的位置。 */
+function waitingPosition(url: string): number | undefined {
+  const key = statusKey(url)
+  const job = queue.waiting.find((entry) => entry.key === url || entry.key === key)
+  return job ? queuePosition(queue, job.id) : undefined
+}
+
 /** 只比用户能看到的内容。session 回写的时间戳不同，不必整表重画。 */
 function sameStatuses(left: DownloadStatusMap, right: DownloadStatusMap): boolean {
   const leftKeys = Object.keys(left)
@@ -161,14 +222,18 @@ function rememberLocal(url: string, record: Omit<DownloadStatusRecord, 'updatedA
 async function readSession(): Promise<void> {
   const stored = await chrome.storage.session.get([
     DOWNLOAD_STATUS_STORAGE_KEY,
+    DOWNLOAD_RETRY_STORAGE_KEY,
     HLS_JOB_STORAGE_KEY,
     DASH_JOB_STORAGE_KEY,
     BILIBILI_JOB_STORAGE_KEY,
+    JOB_QUEUE_STORAGE_KEY,
   ])
   statuses = readDownloadStatusMap(stored[DOWNLOAD_STATUS_STORAGE_KEY])
+  retries = readDownloadRetryMap(stored[DOWNLOAD_RETRY_STORAGE_KEY])
   jobs = readHlsJobMap(stored[HLS_JOB_STORAGE_KEY])
   dashJobs = readDashJobMap(stored[DASH_JOB_STORAGE_KEY])
   bilibiliJobs = readHlsJobMap(stored[BILIBILI_JOB_STORAGE_KEY])
+  queue = readDownloadQueue(stored[JOB_QUEUE_STORAGE_KEY])
 }
 
 function rememberJob(url: string, record: Omit<HlsJobRecord, 'updatedAt'>): void {
@@ -176,6 +241,13 @@ function rememberJob(url: string, record: Omit<HlsJobRecord, 'updatedAt'>): void
     ...jobs,
     [statusKey(url)]: { ...record, updatedAt: Date.now() },
   }
+}
+
+function sameQueue(left: DownloadQueueState, right: DownloadQueueState): boolean {
+  if (left.running.length !== right.running.length || left.waiting.length !== right.waiting.length) return false
+  const same = (a: readonly { id: string }[], b: readonly { id: string }[]): boolean =>
+    a.every((job, index) => job.id === b[index]?.id)
+  return same(left.running, right.running) && same(left.waiting, right.waiting)
 }
 
 function sameJobs(left: HlsJobMap, right: HlsJobMap): boolean {
@@ -188,6 +260,8 @@ function sameJobs(left: HlsJobMap, right: HlsJobMap): boolean {
     if (!a || !b) return false
     if (a.phase !== b.phase || a.message !== b.message || a.completed !== b.completed) return false
     if (a.total !== b.total || a.warning !== b.warning) return false
+    if (a.hasVideo !== b.hasVideo || a.hasAudio !== b.hasAudio || a.audioOnly !== b.audioOnly) return false
+    if (a.live !== b.live) return false
     const leftVariants = a.variants ?? []
     const rightVariants = b.variants ?? []
     if (leftVariants.length !== rightVariants.length) return false
@@ -204,6 +278,7 @@ function onStorageChanged(
   let nextJobs = jobs
   let nextDash = dashJobs
   let nextBilibili = bilibiliJobs
+  let nextQueue = queue
   let changed = false
   if (DOWNLOAD_STATUS_STORAGE_KEY in changes) {
     const parsed = readDownloadStatusMap(changes[DOWNLOAD_STATUS_STORAGE_KEY]?.newValue)
@@ -233,11 +308,19 @@ function onStorageChanged(
       changed = true
     }
   }
+  if (JOB_QUEUE_STORAGE_KEY in changes) {
+    const parsed = readDownloadQueue(changes[JOB_QUEUE_STORAGE_KEY]?.newValue)
+    if (!sameQueue(queue, parsed)) {
+      nextQueue = parsed
+      changed = true
+    }
+  }
   if (!changed) return
   statuses = nextStatuses
   jobs = nextJobs
   dashJobs = nextDash
   bilibiliJobs = nextBilibili
+  queue = nextQueue
   paint()
 }
 
@@ -256,6 +339,7 @@ function liveDownloadRow(url: string, button: HTMLButtonElement): HTMLElement | 
 }
 
 async function requestHlsDownload(url: string): Promise<void> {
+  rememberRetry(url, { kind: 'hls', mode: 'inspect' })
   rememberJob(url, { phase: 'inspecting', message: HLS_TEXT.inspecting, completed: 0, total: 0 })
   paint()
   const message: HlsInspectMessage = { type: MESSAGE_TYPE.HLS_INSPECT, url }
@@ -268,6 +352,19 @@ async function requestHlsDownload(url: string): Promise<void> {
         message: response && response.ok === false ? response.error : '读取清单失败',
         completed: 0,
         total: 0,
+      })
+      paint()
+      return
+    }
+    if ('kind' in response && response.kind === 'live') {
+      rememberRetry(url, { kind: 'hls', mode: 'live', mediaUrl: url })
+      rememberJob(url, {
+        phase: 'picking',
+        message: HLS_TEXT.liveHint,
+        completed: 0,
+        total: 0,
+        live: true,
+        warning: response.warning,
       })
       paint()
       return
@@ -285,9 +382,12 @@ async function requestHlsDownload(url: string): Promise<void> {
       return
     }
     if ('kind' in response && response.kind === 'media') {
+      // 后台可能已经把这条放进队列，storage 里才是真正的排队位置。
+      await readSession()
+      const position = waitingPosition(url)
       rememberJob(url, {
-        phase: 'downloading',
-        message: HLS_TEXT.started,
+        phase: position === undefined ? 'downloading' : 'queued',
+        message: position === undefined ? HLS_TEXT.started : queuedStatusText(position),
         completed: 0,
         total: response.total,
         warning: response.warning,
@@ -309,6 +409,7 @@ async function startHlsDownload(url: string, mediaUrl: string): Promise<void> {
     paint()
     return
   }
+  rememberRetry(url, { kind: 'hls', mode: 'download', mediaUrl })
   preferredVariant.set(url, mediaUrl)
   rememberJob(url, { phase: 'downloading', message: HLS_TEXT.started, completed: 0, total: 0 })
   paint()
@@ -331,6 +432,190 @@ async function startHlsDownload(url: string, mediaUrl: string): Promise<void> {
   }
 }
 
+async function requestHlsLive(url: string): Promise<void> {
+  rememberRetry(url, { kind: 'hls', mode: 'live', mediaUrl: url })
+  rememberJob(url, {
+    phase: 'inspecting',
+    message: HLS_TEXT.inspecting,
+    completed: 0,
+    total: 0,
+    live: true,
+  })
+  paint()
+  const message: HlsLiveInspectMessage = { type: MESSAGE_TYPE.HLS_LIVE_INSPECT, url }
+  if (tabId !== undefined) message.tabId = tabId
+  try {
+    const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))
+    if (!response || response.ok === false) {
+      rememberJob(url, {
+        phase: 'failed',
+        message: response && response.ok === false ? response.error : '读取清单失败',
+        completed: 0,
+        total: 0,
+        live: true,
+      })
+      paint()
+      return
+    }
+    if ('kind' in response && response.kind === 'master') {
+      rememberJob(url, {
+        phase: 'picking',
+        message: HLS_TEXT.picking,
+        completed: 0,
+        total: 0,
+        variants: response.variants,
+        warning: response.warning,
+        live: true,
+      })
+      paint()
+      return
+    }
+    if ('kind' in response && response.kind === 'live') {
+      await startHlsLive(url, url, response.warning)
+      return
+    }
+    rememberJob(url, {
+      phase: 'failed',
+      message: HLS_TEXT.liveNotLive,
+      completed: 0,
+      total: 0,
+      live: true,
+    })
+    paint()
+  } catch {
+    rememberJob(url, {
+      phase: 'failed',
+      message: '读取清单失败',
+      completed: 0,
+      total: 0,
+      live: true,
+    })
+    paint()
+  }
+}
+
+async function startHlsLive(url: string, mediaUrl: string, warning?: string): Promise<void> {
+  if (!mediaUrl) {
+    rememberJob(url, {
+      phase: 'failed',
+      message: HLS_TEXT.noVariants,
+      completed: 0,
+      total: 0,
+      live: true,
+    })
+    paint()
+    return
+  }
+  rememberRetry(url, { kind: 'hls', mode: 'live', mediaUrl })
+  preferredVariant.set(url, mediaUrl)
+  rememberJob(url, {
+    phase: 'recording',
+    message: HLS_TEXT.liveStarting,
+    completed: 0,
+    total: 0,
+    live: true,
+    warning,
+  })
+  paint()
+  const message: HlsLiveStartMessage = { type: MESSAGE_TYPE.HLS_LIVE_START, url, mediaUrl }
+  if (tabId !== undefined) message.tabId = tabId
+  try {
+    const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))
+    if (!response || response.ok === false) {
+      rememberJob(url, {
+        phase: 'failed',
+        message: response && response.ok === false ? response.error : HLS_TEXT.offscreen,
+        completed: 0,
+        total: 0,
+        live: true,
+        warning,
+      })
+      paint()
+      return
+    }
+    // 后台可能把这条排进队列，storage 里才是真正的状态。
+    await readSession()
+    const position = waitingPosition(url)
+    if (position !== undefined) {
+      rememberJob(url, {
+        phase: 'queued',
+        message: queuedStatusText(position),
+        completed: 0,
+        total: 0,
+        live: true,
+        warning,
+      })
+      paint()
+    }
+  } catch {
+    rememberJob(url, {
+      phase: 'failed',
+      message: HLS_TEXT.offscreen,
+      completed: 0,
+      total: 0,
+      live: true,
+      warning,
+    })
+    paint()
+  }
+}
+
+async function stopHlsLive(url: string): Promise<void> {
+  const previous = jobs[statusKey(url)]
+  rememberJob(url, {
+    phase: 'remuxing',
+    message: HLS_TEXT.liveStopAndSave,
+    completed: previous?.completed ?? 0,
+    total: previous?.total ?? 0,
+    live: true,
+    warning: previous?.warning,
+    recordedMs: previous?.recordedMs,
+    recordedBytes: previous?.recordedBytes,
+  })
+  paint()
+  try {
+    const response = readHlsUserResponse(
+      await chrome.runtime.sendMessage({ type: MESSAGE_TYPE.HLS_LIVE_STOP, url }),
+    )
+    if (response && response.ok === false) {
+      rememberJob(url, {
+        phase: 'failed',
+        message: response.error,
+        completed: 0,
+        total: 0,
+        live: true,
+      })
+      paint()
+    }
+  } catch {
+    rememberJob(url, {
+      phase: 'failed',
+      message: '停止录制失败，请再试一次',
+      completed: 0,
+      total: 0,
+      live: true,
+    })
+    paint()
+  }
+}
+
+async function cancelHlsLive(url: string): Promise<void> {
+  rememberJob(url, { phase: 'cancelled', message: HLS_TEXT.cancelled, completed: 0, total: 0, live: true })
+  paint()
+  try {
+    await chrome.runtime.sendMessage({ type: MESSAGE_TYPE.HLS_LIVE_CANCEL, url })
+  } catch {
+    rememberJob(url, {
+      phase: 'failed',
+      message: '取消失败，请再试一次',
+      completed: 0,
+      total: 0,
+      live: true,
+    })
+    paint()
+  }
+}
+
 function rememberDash(url: string, record: Omit<HlsJobRecord, 'updatedAt'>): void {
   dashJobs = {
     ...dashJobs,
@@ -338,10 +623,26 @@ function rememberDash(url: string, record: Omit<HlsJobRecord, 'updatedAt'>): voi
   }
 }
 
-async function requestDashDownload(url: string): Promise<void> {
-  rememberDash(url, { phase: 'inspecting', message: HLS_TEXT.inspecting, completed: 0, total: 0 })
+async function requestDashDownload(url: string, audioOnly: boolean): Promise<void> {
+  const separate = audioOnly ? false : wantsSeparate()
+  rememberRetry(url, { kind: 'dash', mode: 'inspect', audioOnly, separate })
+  const previous = dashJobs[statusKey(url)]
+  rememberDash(url, {
+    phase: 'inspecting',
+    message: HLS_TEXT.inspecting,
+    completed: 0,
+    total: 0,
+    audioOnly,
+    hasVideo: previous?.hasVideo,
+    hasAudio: previous?.hasAudio,
+  })
   paint()
-  const message: DashInspectMessage = { type: MESSAGE_TYPE.DASH_INSPECT, url, separate: wantsSeparate() }
+  const message: DashInspectMessage = {
+    type: MESSAGE_TYPE.DASH_INSPECT,
+    url,
+    separate,
+    audioOnly,
+  }
   if (tabId !== undefined) message.tabId = tabId
   try {
     const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))
@@ -351,6 +652,9 @@ async function requestDashDownload(url: string): Promise<void> {
         message: response && response.ok === false ? response.error : '读取清单失败',
         completed: 0,
         total: 0,
+        audioOnly,
+        hasVideo: response && response.ok === false ? response.hasVideo : previous?.hasVideo,
+        hasAudio: response && response.ok === false ? response.hasAudio : previous?.hasAudio,
       })
       paint()
       return
@@ -363,50 +667,110 @@ async function requestDashDownload(url: string): Promise<void> {
         total: 0,
         variants: response.variants,
         warning: response.warning,
+        audioOnly,
+        hasVideo: response.hasVideo ?? previous?.hasVideo,
+        hasAudio: response.hasAudio ?? previous?.hasAudio,
       })
       paint()
       return
     }
     if ('kind' in response && response.kind === 'media') {
+      await readSession()
+      const position = waitingPosition(url)
       rememberDash(url, {
-        phase: 'downloading',
-        message: HLS_TEXT.started,
+        phase: position === undefined ? 'downloading' : 'queued',
+        message: position === undefined ? HLS_TEXT.started : queuedStatusText(position),
         completed: 0,
         total: response.total,
         warning: response.warning,
+        audioOnly,
+        hasVideo: response.hasVideo ?? previous?.hasVideo,
+        hasAudio: response.hasAudio ?? previous?.hasAudio,
       })
       paint()
       return
     }
-    rememberDash(url, { phase: 'failed', message: '读取清单失败', completed: 0, total: 0 })
+    if (response.ok === true) {
+      await readSession()
+      const position = waitingPosition(url)
+      rememberDash(url, {
+        phase: position === undefined ? 'downloading' : 'queued',
+        message: position === undefined ? HLS_TEXT.started : queuedStatusText(position),
+        completed: 0,
+        total: 0,
+        audioOnly,
+        hasVideo: previous?.hasVideo,
+        hasAudio: previous?.hasAudio,
+      })
+      paint()
+      return
+    }
+    rememberDash(url, {
+      phase: 'failed',
+      message: '读取清单失败',
+      completed: 0,
+      total: 0,
+      audioOnly,
+      hasVideo: previous?.hasVideo,
+      hasAudio: previous?.hasAudio,
+    })
     paint()
   } catch {
-    rememberDash(url, { phase: 'failed', message: '读取清单失败', completed: 0, total: 0 })
+    rememberDash(url, {
+      phase: 'failed',
+      message: '读取清单失败',
+      completed: 0,
+      total: 0,
+      audioOnly,
+      hasVideo: previous?.hasVideo,
+      hasAudio: previous?.hasAudio,
+    })
     paint()
   }
 }
 
-async function startDashDownload(url: string, representationId: string): Promise<void> {
+async function startDashDownload(
+  url: string,
+  representationId: string,
+  retryAudioOnly?: boolean,
+  retrySeparate?: boolean,
+): Promise<void> {
   if (!representationId) {
-    rememberDash(url, { phase: 'failed', message: HLS_TEXT.noVariants, completed: 0, total: 0 })
+    const previous = dashJobs[statusKey(url)]
+    rememberDash(url, {
+      phase: 'failed',
+      message: HLS_TEXT.noVariants,
+      completed: 0,
+      total: 0,
+      audioOnly: previous?.audioOnly,
+      hasVideo: previous?.hasVideo,
+      hasAudio: previous?.hasAudio,
+    })
     paint()
     return
   }
   preferredVariant.set(url, representationId)
   const previous = dashJobs[statusKey(url)]
+  const audioOnly = retryAudioOnly ?? previous?.audioOnly === true
+  const separate = audioOnly ? false : (retrySeparate ?? wantsSeparate())
+  rememberRetry(url, { kind: 'dash', mode: 'download', representationId, audioOnly, separate })
   rememberDash(url, {
     phase: 'downloading',
     message: HLS_TEXT.started,
     completed: 0,
     total: 0,
     warning: previous?.warning,
+    audioOnly,
+    hasVideo: previous?.hasVideo,
+    hasAudio: previous?.hasAudio,
   })
   paint()
   const message: DashDownloadMessage = {
     type: MESSAGE_TYPE.DASH_DOWNLOAD,
     url,
     representationId,
-    separate: wantsSeparate(),
+    separate,
+    audioOnly,
   }
   if (tabId !== undefined) message.tabId = tabId
   try {
@@ -417,11 +781,22 @@ async function startDashDownload(url: string, representationId: string): Promise
         message: response && response.ok === false ? response.error : HLS_TEXT.offscreen,
         completed: 0,
         total: 0,
+        audioOnly,
+        hasVideo: previous?.hasVideo,
+        hasAudio: previous?.hasAudio,
       })
       paint()
     }
   } catch {
-    rememberDash(url, { phase: 'failed', message: HLS_TEXT.offscreen, completed: 0, total: 0 })
+    rememberDash(url, {
+      phase: 'failed',
+      message: HLS_TEXT.offscreen,
+      completed: 0,
+      total: 0,
+      audioOnly,
+      hasVideo: previous?.hasVideo,
+      hasAudio: previous?.hasAudio,
+    })
     paint()
   }
 }
@@ -447,13 +822,16 @@ function rememberBilibili(url: string, record: Omit<HlsJobRecord, 'updatedAt'>):
 async function requestBilibiliDownload(
   url: string,
   mode: 'with-audio' | 'audio-only' | 'video-only',
+  retrySeparate?: boolean,
 ): Promise<void> {
+  const separate = mode === 'with-audio' ? (retrySeparate ?? wantsSeparate()) : false
+  rememberRetry(url, { kind: 'bilibili', mode, separate })
   rememberBilibili(url, { phase: 'downloading', message: BILIBILI_TEXT.preparing, completed: 0, total: 0 })
   paint()
   const message: BilibiliDownloadMessage = { type: MESSAGE_TYPE.BILIBILI_DOWNLOAD, url }
   if (mode === 'with-audio') {
     message.withAudio = true
-    message.separate = wantsSeparate()
+    message.separate = separate
   } else if (mode === 'audio-only') {
     message.audioOnly = true
   }
@@ -505,7 +883,10 @@ async function requestDownload(url: string, button: HTMLButtonElement): Promise<
     const status = statusFromDownloadResponse(response)
     rememberLocal(url, status)
     const row = liveDownloadRow(url, button)
-    if (row) setRowStatus(row, status)
+    if (row) {
+      setRowStatus(row, status)
+      if (status.phase !== 'failed') row.querySelector('[data-action="retry"]')?.remove()
+    }
     const liveButton = row?.querySelector<HTMLButtonElement>('[data-action="download"]') ?? button
     flashButton(liveButton, downloadFeedback(response))
   } catch {
@@ -516,6 +897,48 @@ async function requestDownload(url: string, button: HTMLButtonElement): Promise<
     const liveButton = row?.querySelector<HTMLButtonElement>('[data-action="download"]') ?? button
     flashButton(liveButton, '下载失败')
   }
+}
+
+async function retryDownload(url: string, button: HTMLButtonElement): Promise<void> {
+  const plan = retries[statusKey(url)]
+  if (plan?.kind === 'hls') {
+    if (plan.mode === 'download' && plan.mediaUrl) await startHlsDownload(url, plan.mediaUrl)
+    else if (plan.mode === 'live' && plan.mediaUrl) await startHlsLive(url, plan.mediaUrl)
+    else await requestHlsDownload(url)
+    return
+  }
+  if (plan?.kind === 'dash') {
+    if (plan.mode === 'download' && plan.representationId) {
+      await startDashDownload(url, plan.representationId, plan.audioOnly, plan.separate)
+    } else {
+      await requestDashDownload(url, plan.audioOnly)
+    }
+    return
+  }
+  if (plan?.kind === 'bilibili') {
+    await requestBilibiliDownload(url, plan.mode, plan.separate)
+    return
+  }
+
+  // 旧会话里没有保留参数时，按条目类型退回原来的入口，至少能重新发起。
+  const key = statusKey(url)
+  const item = items.find((entry) => entry.url === url || statusKey(entry.url) === key)
+  if (item?.kind === 'hls') {
+    await requestHlsDownload(url)
+    return
+  }
+  if (item?.kind === 'dash') {
+    await requestDashDownload(url, false)
+    return
+  }
+  if (item?.bilibili) {
+    const hasAudio = items.some((entry) => entry.bilibili?.role === 'audio')
+    if (item.bilibili.role === 'audio') await requestBilibiliDownload(url, 'audio-only')
+    else if (hasAudio) await requestBilibiliDownload(url, 'with-audio')
+    else await requestBilibiliDownload(url, 'video-only')
+    return
+  }
+  await requestDownload(url, button)
 }
 
 async function clearMedia(): Promise<void> {
@@ -543,9 +966,12 @@ async function load(): Promise<void> {
   hideBanner()
 
   try {
-    tabId = await queryActiveTabId()
+    const tab = await queryActiveTab()
+    tabId = tab?.id
+    pageTitle = tab ? pageTitleText(tab) : ''
   } catch {
     tabId = undefined
+    pageTitle = ''
   }
 
   if (tabId === undefined) {
@@ -574,6 +1000,8 @@ async function load(): Promise<void> {
       jobs = {}
       dashJobs = {}
       bilibiliJobs = {}
+      queue = emptyQueue()
+      retries = {}
     }
     paint()
     void chrome.runtime.sendMessage({ type: MESSAGE_TYPE.HLS_SYNC }).catch(() => undefined)
@@ -600,6 +1028,9 @@ function start(): void {
     onDownload(url, button) {
       void requestDownload(url, button)
     },
+    onRetry(url, button) {
+      void retryDownload(url, button)
+    },
     onHlsDownload(url) {
       void requestHlsDownload(url)
     },
@@ -612,8 +1043,23 @@ function start(): void {
     onHlsVariant(url, mediaUrl) {
       preferredVariant.set(url, mediaUrl)
     },
+    onHlsLive(url) {
+      void requestHlsLive(url)
+    },
+    onHlsLiveStart(url, mediaUrl) {
+      void startHlsLive(url, mediaUrl)
+    },
+    onHlsLiveStop(url) {
+      void stopHlsLive(url)
+    },
+    onHlsLiveCancel(url) {
+      void cancelHlsLive(url)
+    },
     onDashDownload(url) {
-      void requestDashDownload(url)
+      void requestDashDownload(url, false)
+    },
+    onDashAudio(url) {
+      void requestDashDownload(url, true)
     },
     onDashStart(url, representationId) {
       void startDashDownload(url, representationId)

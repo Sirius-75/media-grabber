@@ -152,7 +152,7 @@ flowchart LR
 
 1. **DRM / 加密**：带 EME 加密的内容（Netflix、付费平台等）不处理。HLS 的标准 AES-128（`METHOD=AES-128`，密钥格式是 identity 或缺省，密钥地址是 http 或 https）可以下载，见第 11 节。`METHOD=NONE` 不算加密。SAMPLE-AES、`KEYFORMAT` 不是 identity、清单里出现 FairPlay / Widevine / PlayReady 的迹象，都会用中文拒绝。密钥要能用普通请求拿到；401、403 或网络失败就停，不伪造请求头。
 2. **blob: / MSE**：大多数现代播放器（YouTube 等）用 MediaSource 播放，`<video>` 上看到的是 `blob:`，无法直接下载；真实地址往往是分片或清单，只能靠 webRequest 去碰运气。B 站视频页没有 `.mpd`，分轨地址从页面脚本或 `*.bilivideo.com` 上的单个 `.m4s` 读取，见第 12 节。
-3. **分片流**：未加密的 HLS 点播、标准 AES-128 的 HLS 点播，以及未加密的 DASH 静态点播可以下载，见第 10、11 节。DASH 的视频和音频通常是两条 fMP4，扩展会存成两个文件，不会合成一个。直播、SAMPLE-AES、DRM、多 Period、SegmentBase 不下载。AES-128 解密后的 MPEG-TS 会转封装成 fMP4；转失败或文件太大时仍保存 `.ts`。带 `#EXT-X-MAP` 的 fMP4 只做顺序拼接，这种清单如果同时还是 AES-128，会拒绝。B 站分轨见第 12 节，和 HLS 解密不是一条路径。
+3. **分片流**：未加密的 HLS 点播、标准 AES-128 的 HLS 点播，以及未加密的 DASH 静态点播可以下载，见第 10、11 节。DASH 的视频和音频通常是两条 fMP4，扩展会存成两个文件，不会合成一个。HLS 直播可以录制，见第 17 节；DASH 直播、SAMPLE-AES、DRM、多 Period、SegmentBase 不下载。AES-128 解密后的 MPEG-TS 会转封装成 fMP4；转失败或文件太大时仍保存 `.ts`。带 `#EXT-X-MAP` 的 fMP4 只做顺序拼接，这种清单如果同时还是 AES-128，会拒绝。B 站分轨见第 12 节，和 HLS 解密不是一条路径。
 4. **大小未知**：分块传输、没有 `Content-Length`、或者只看到 Range 片段时，大小显示"未知"或不准。
 5. **防盗链 / 鉴权**：有些链接依赖 Referer、Cookie 或会过期的签名，`chrome.downloads` 下载可能报 403，复制出去用也可能失效。普通直链、HLS 和 DASH 仍然不改请求头。只有 B 站分轨下载会给扩展自己的请求补上页面 Referer，而且只下页面现在就能播的内容。链接过期后要先刷新页面再下载。
 6. **Service worker 回收**：SW 被回收期间发生的请求不会丢（事件会唤醒 SW），但内存状态会丢，所以一律用 storage.session。
@@ -255,7 +255,7 @@ flowchart LR
 - [ ] 扩展的 errors 页面没有报错
 - [ ] 访问带 DRM 的页面时扩展不做任何绕过，只按普通资源规则列出能看到的 URL
 - [ ] 未加密 HLS 点播：主清单能选清晰度（默认最高），进度条会走，取消有效，关掉 popup 再打开还能看到进度
-- [ ] 直播 m3u8、SAMPLE-AES、非 identity 的 KEYFORMAT、带 Widevine / PlayReady / FairPlay 迹象的清单会用中文拒绝，不会开始下分片
+- [ ] HLS 直播 m3u8 显示「录制直播」，能停止并保存；SAMPLE-AES、非 identity 的 KEYFORMAT、带 Widevine / PlayReady / FairPlay 迹象的清单会用中文拒绝，不会开始下分片
 - [ ] 标准 AES-128 点播可以下载。条目备注写「含 AES-128 加密」。密钥返回 401、403 或不是 16 字节时，用中文停下来，不伪造 Referer 或其他请求头
 - [ ] 未加密的 DASH 点播：多清晰度能选（默认最高视频），进度条会走，取消有效。视频和音频分开时默认合并成一个 `.mp4`，合并中显示「正在合并…」，关掉弹窗再打开还能看到。合并失败、合计超过 1GB，或勾选「分开保存视频和音频」时保存两个文件，并写明原因。直播、ContentProtection、多个 Period、SegmentBase 会用中文拒绝
 - [ ] 下载出来的文件：普通 TS 转封装成功时是 `.mp4`（fMP4，没有重编码，文件头时长是实际总时长）；转封装失败时是 `.ts`，条目上写明可用 VLC 播放。带 EXT-X-MAP 的 fMP4 仍是顺序拼接的 `.mp4`。AES-128 解密成功但转封装失败时，保存的 `.ts` 是明文，不是密文
@@ -365,13 +365,13 @@ mux.js 的 Transmuxer 只吃 MPEG-TS（以及 AAC），不能把两路已经是 
 
 - 下载跑在同一个 offscreen 文档里（`src/offscreen/dash-task.ts`），不进 service worker。解析器不打进后台包。没有新权限。offscreen 只拉取和拼接；进度写入和 `chrome.downloads` 与 HLS 一样交给 service worker。视频和音频两个文件都这样保存。
 - 进度、取消、并发 4、失败后再试 2 次，都走原来的 `downloadSegmentsInOrder`。
-- 任务记录形状和 HLS 相同，单独放在 `chrome.storage.session` 的 `dash-jobs`。offscreen 把记录发给 service worker 再写入。关掉 popup 再打开还能看到。同一时间只允许一个 HLS、DASH 或 B 站下载。
+- 任务记录形状和 HLS 相同，单独放在 `chrome.storage.session` 的 `dash-jobs`。offscreen 把记录发给 service worker 再写入。关掉 popup 再打开还能看到。V4-3 起，HLS、DASH 和 B 站一起最多同时跑两个，多出来的先排队，见第 16 节。
 - 文件名用 `buildDownloadFilename`。直接把 `.mpd` 交给 `chrome.downloads` 会被拒绝，并提示用列表里的下载。
 
 ### 这一步故意不做
 
 - v2 不解密。标准 AES-128 见第 11 节。SAMPLE-AES 和 DRM 仍然不做。HLS 和 DASH 不伪造 Referer 或任何请求头。B 站分轨是第 12 节的例外。
-- 不下载直播。
+- v2 不下载直播。V4-5 起 HLS 直播可以录制，见第 17 节；DASH 直播仍不下载。
 - 不重新编码。mux.js 不认识的编码保留 `.ts`。
 - v2 不把分开的音视频合成一个文件。两路 fMP4 的合并在第 13 节，用纯 TypeScript 改 box，不用 mux.js，也不重编码。
 - 不在 service worker 里跑分片循环或转封装。
@@ -393,7 +393,7 @@ V3-1 没有新权限。版本号在 V3-2 升到 0.2.1，见第 12 节。
    - 起始清单里有 DRM 迹象：`com.apple.streamingkeydelivery`、`skd://`、Widevine URN `edef8ba9-79d6-4ace-a3c8-27dcd51d21ed`、PlayReady URN `9a04f079-9840-4286-ab92-e65be0885f95`，以及 `com.widevine`、`com.microsoft.playready`。
    - 密钥不是 16 字节，或加密分片长度不是 16 的整数倍。
    - 带 `EXT-X-MAP` 的 AES-128。解密后要走 TS 转封装，fMP4 初始化段这条路径不做。
-   - 直播和 `EXT-X-BYTERANGE` 跟以前一样拒绝。
+   - `EXT-X-BYTERANGE` 跟以前一样拒绝。V4-5 起没有 `EXT-X-ENDLIST` 的媒体清单走直播录制，见第 17 节。
 3. **取密钥和解密**（`src/shared/hls-aes.ts`，在 offscreen 页面里调用）
    - 和分片一样用普通 `fetch`：不设置 `headers`，不伪造 Referer、Cookie 或 UA，不用 `declarativeNetRequest`。`credentials: 'include'` 只带浏览器里已经有的 Cookie。
    - 401、403、404、网络失败或密钥长度不对，就停，中文说明是获取密钥失败。不去绕。
@@ -433,7 +433,7 @@ B 站网页播放器没有 `.mpd`。视频和音频是两个独立的 fMP4（`.m
 3. `action` 是 `modifyHeaders`，只设置一个请求头：Referer，`operation` 为 `set`。值是触发下载的标签页 URL 的 origin 再加 `/`，例如 `https://www.bilibili.com/`。只接受 http / https 页面。不改 Cookie、User-Agent、Origin 或任何其它头。
 4. 不处理登录权限，不绕过会员或付费限制，不处理 DRM，不碰 Widevine。401 / 403 直接用中文报错，不重试、不换地址。这套规则不用于 HLS（包括取 AES-128 密钥）、DASH 和普通直链。
 
-0.2.3 调整了视频行按钮。0.2.2 是第 13 节的合并。0.2.1 用来和 0.2.0 的构建区分。当前版本是 0.2.4，见第 14 节。
+0.2.3 调整了视频行按钮。0.2.2 是第 13 节的合并。0.2.1 用来和 0.2.0 的构建区分。0.2.4 是并行分段下载，之后的版本见第 18 节。
 
 ## 13. V3-3 两路 fMP4 合并成一个 mp4
 
@@ -476,3 +476,40 @@ B 站网页播放器没有 `.mpd`。视频和音频是两个独立的 fMP4（`.m
 ### 弹窗排序
 
 显示时分三档，不改已经存下的顺序，也不看下载进度。`data-index` 仍是存储里的下标。第 1 档是已识别的 B 站视频、音频、整段，以及普通直链和能下载的 HLS、DASH。第 2 档是类型未知的「B站 m4s 分轨文件」，以及其它只有一颗「下载」的次要条目。第 3 档是没有下载按钮的条目。同一档保持原来的先后。进度文字仍是「正在下载文件 X MB / Y MB」，能算出最近几秒的速度时附在后面。
+
+## 15. V4-2 DASH 分「下载视频 / 下载音频」
+
+版本仍是 0.2.4。没有新权限，也不改 Referer 规则。
+
+DASH 清单行和 B 站一样有两颗按钮：
+
+- 「下载视频」带声音，有独立音轨时默认合并成一个 `.mp4`。清单里没有音频轨时按钮仍可用，条目说明写「没找到音频，下载的视频没有声音」。
+- 「下载音频」只下音频轨。清单里有多条音轨时先选，默认停在各 AdaptationSet 里带宽最高的那条，保存为 `.m4a`。
+- 清单里只有音频轨时只显示「下载音频」。这个判断来自上一次检查清单的结果，记在 `dash-jobs` 的 `hasVideo` / `hasAudio` 里；还没检查过时两颗按钮都显示，点「下载视频」会得到「清单里只有音频轨，请用「下载音频」」并改成只显示音频按钮。
+
+消息协议沿用 `BilibiliDownloadMessage` 的命名，在 `DashInspectMessage` 和 `DashDownloadMessage` 上增加可选的 `audioOnly`，由 `messages.ts` 的类型守卫校验。解析和下载计划在 `planDashDownload` 里用 `audioOnly` 区分视频 / 音频；选音轨时 `representationId` 是音频 Representation 的 id。`dash-task` 的每一次进度写入都带上 `hasVideo` / `hasAudio` / `audioOnly`，避免后台整条覆盖时丢掉按钮条件。V3-4 的三档排序和 `data-index` 保持不变。
+
+没有新增依赖，不设置任何自定义请求头，下载仍在 offscreen 里完成。
+
+
+## 16. V4-3 下载队列与并发限制
+
+版本仍是 0.2.4。没有新权限，也不新增依赖。
+
+`src/shared/download-queue.ts` 是纯函数队列，`MAX_CONCURRENT_JOBS = 2`。HLS、DASH、B 站这些经 offscreen 的任务先入队，普通 `chrome.downloads` 直链不占槽位。队列状态存在 `chrome.storage.session` 的 `download-queue`，service worker 被回收后能恢复：还活在 offscreen 里的 running 保留，不在的标成中断；排队超过 24 小时的也会清理，不会留下永远「排队中」的条目。
+
+弹窗里排队的条目显示「排队中（第 N 位）」，点「取消」直接把它移出队列，不会去碰 offscreen。前一条完成、失败或取消后，队首自动补位。offscreen 同时最多接受两条任务，仍然只使用 `chrome.runtime`；B 站的两条并行下载各用一段 Referer 规则号（910001–910032 分成两段），规则边界不变。
+
+## 17. V4-5 HLS 直播录制
+
+版本仍是 0.2.4。没有新权限，也不新增依赖，不改 Referer 规则。
+
+没有 `EXT-X-ENDLIST` 的媒体清单不再直接拒绝，`src/shared/hls.ts` 返回 `kind: 'live'`，并记下 `EXT-X-TARGETDURATION` 和每片的 `EXT-X-MEDIA-SEQUENCE`。主清单仍走原来的选清晰度逻辑。点「录制直播」后，`src/shared/hls-live.ts` 在 offscreen 里用 setTimeout 链轮询（间隔是目标时长的一半，夹在 1 到 5 秒），按 media sequence 去重，只下载新分片；标准 AES-128 沿用点播的取密钥、解密方式。SAMPLE-AES、DRM、非 identity 的 KEYFORMAT、字节范围仍然拒绝。
+
+录制中弹窗显示「正在录制 mm:ss / 已录 X MB」，有「停止并保存」和「取消」。停止只中断轮询，已经录到的分片继续走点播的 TS 转封装和时长修正；转封装失败保存 `.ts`。取消不保存。已录达到 1GB、清单出现 `EXT-X-ENDLIST`、连续 30 秒没有新分片、清单连续失败 5 次时自动停止并保存，并在条目说明里写原因。直播任务也进入 V4-3 的下载队列。
+
+## 18. 版本 0.3.0
+
+V4-1 到 V4-5 全部完成，版本升到 0.3.0：下载文件名带清晰度、DASH 有「下载视频 / 下载音频」两颗按钮、下载队列最多同时 2 条、失败后可重试且接近 1 GB 会提前提醒、HLS 直播可以录制。直播录制是 v3 的最后一项，所以这一版算 v3 收尾。
+
+没有新增权限和依赖。Referer 规则仍只给 B 站下载用，边界不变。不处理 DRM，不绕过付费或加密保护。

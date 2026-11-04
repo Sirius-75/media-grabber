@@ -15,6 +15,10 @@ import {
   isHlsCancelMessage,
   isHlsDownloadMessage,
   isHlsInspectMessage,
+  isHlsLiveCancelMessage,
+  isHlsLiveInspectMessage,
+  isHlsLiveStartMessage,
+  isHlsLiveStopMessage,
   isHlsSyncMessage,
   isMediaFoundMessage,
 } from '../src/shared/messages'
@@ -30,6 +34,10 @@ describe('消息常量', () => {
       HLS_DOWNLOAD: 'HLS_DOWNLOAD',
       HLS_CANCEL: 'HLS_CANCEL',
       HLS_SYNC: 'HLS_SYNC',
+      HLS_LIVE_INSPECT: 'HLS_LIVE_INSPECT',
+      HLS_LIVE_START: 'HLS_LIVE_START',
+      HLS_LIVE_STOP: 'HLS_LIVE_STOP',
+      HLS_LIVE_CANCEL: 'HLS_LIVE_CANCEL',
       DASH_INSPECT: 'DASH_INSPECT',
       DASH_DOWNLOAD: 'DASH_DOWNLOAD',
       DASH_CANCEL: 'DASH_CANCEL',
@@ -215,6 +223,41 @@ describe('HLS 消息', () => {
     expect(isHlsSyncMessage({ type: MESSAGE_TYPE.HLS_SYNC })).toBe(true)
     expect(isHlsSyncMessage({ type: MESSAGE_TYPE.HLS_CANCEL })).toBe(false)
   })
+
+  it('直播录制有独立的检查、开始、停止和取消消息', () => {
+    expect(isHlsLiveInspectMessage({ type: MESSAGE_TYPE.HLS_LIVE_INSPECT, url: 'https://cdn.example/live.m3u8' })).toBe(
+      true,
+    )
+    expect(isHlsLiveInspectMessage({ type: MESSAGE_TYPE.HLS_LIVE_INSPECT, url: '' })).toBe(false)
+    expect(isHlsLiveInspectMessage({ type: MESSAGE_TYPE.HLS_LIVE_INSPECT, url: 'u', tabId: -1 })).toBe(false)
+    expect(
+      isHlsLiveStartMessage({
+        type: MESSAGE_TYPE.HLS_LIVE_START,
+        url: 'https://cdn.example/live.m3u8',
+        mediaUrl: 'https://cdn.example/720.m3u8',
+        tabId: 3,
+      }),
+    ).toBe(true)
+    expect(
+      isHlsLiveStartMessage({
+        type: MESSAGE_TYPE.HLS_LIVE_START,
+        url: 'https://cdn.example/live.m3u8',
+      }),
+    ).toBe(false)
+    expect(isHlsLiveStopMessage({ type: MESSAGE_TYPE.HLS_LIVE_STOP, url: 'https://cdn.example/live.m3u8' })).toBe(true)
+    expect(isHlsLiveStopMessage({ type: MESSAGE_TYPE.HLS_LIVE_STOP })).toBe(false)
+    expect(isHlsLiveCancelMessage({ type: MESSAGE_TYPE.HLS_LIVE_CANCEL, url: 'https://cdn.example/live.m3u8' })).toBe(
+      true,
+    )
+    expect(isHlsLiveCancelMessage({ type: MESSAGE_TYPE.HLS_LIVE_CANCEL, url: ' ' })).toBe(false)
+    expect(
+      isExtensionMessage({
+        type: MESSAGE_TYPE.HLS_LIVE_START,
+        url: 'https://cdn.example/live.m3u8',
+        mediaUrl: 'https://cdn.example/live.m3u8',
+      }),
+    ).toBe(true)
+  })
 })
 
 describe('DASH 消息', () => {
@@ -224,16 +267,35 @@ describe('DASH 消息', () => {
     )
     expect(isDashInspectMessage({ type: MESSAGE_TYPE.DASH_INSPECT, url: '  ' })).toBe(false)
     expect(
+      isDashInspectMessage({
+        type: MESSAGE_TYPE.DASH_INSPECT,
+        url: 'https://cdn.example/a.mpd',
+        audioOnly: true,
+      }),
+    ).toBe(true)
+    expect(
+      isDashInspectMessage({
+        type: MESSAGE_TYPE.DASH_INSPECT,
+        url: 'https://cdn.example/a.mpd',
+        audioOnly: 'yes',
+      }),
+    ).toBe(false)
+    expect(
       isDashDownloadMessage({
         type: MESSAGE_TYPE.DASH_DOWNLOAD,
         url: 'https://cdn.example/a.mpd',
-        representationId: 'video-1080',
+        representationId: 'audio-main',
+        audioOnly: true,
       }),
     ).toBe(true)
-    expect(isDashDownloadMessage({ type: MESSAGE_TYPE.DASH_DOWNLOAD, url: 'https://cdn.example/a.mpd' })).toBe(false)
-    expect(isDashDownloadMessage({ type: MESSAGE_TYPE.DASH_DOWNLOAD, url: 'https://cdn.example/a.mpd', representationId: '  ' })).toBe(
-      false,
-    )
+    expect(
+      isDashDownloadMessage({
+        type: MESSAGE_TYPE.DASH_DOWNLOAD,
+        url: 'https://cdn.example/a.mpd',
+        representationId: 'audio-main',
+        audioOnly: 1,
+      }),
+    ).toBe(false)
     expect(
       isDashDownloadMessage({
         type: MESSAGE_TYPE.DASH_DOWNLOAD,

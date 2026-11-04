@@ -85,6 +85,16 @@ button:not(:disabled):hover {
   color: #8a4b2f;
 }
 
+.page-title {
+  margin: 10px 0 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #3d5560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .empty {
   margin: 14px 0 4px;
   font-size: 13px;
