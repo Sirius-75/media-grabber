@@ -3,6 +3,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { DASH_TEXT } from '../src/shared/dash-text'
+import { SUBTITLE_TEXT } from '../src/shared/webvtt'
 import { describeDashFetchFailure, fillDashTemplate, parseIsoDuration, parseMpd, planDashDownload } from '../src/shared/dash'
 
 const MANIFEST = 'https://origin.example/dash/master.mpd?token=secret'
@@ -285,5 +286,71 @@ describe('解析 MPD', () => {
       ok: false,
       error: DASH_TEXT.noAudioTrack,
     })
+  })
+
+  it('列出 WebVTT 和 TTML，stpp 只给出不支持的说明，音视频计划不变', () => {
+    const parsed = parseMpd(
+      mpd(`
+        <Period duration="PT4S">
+          <AdaptationSet mimeType="video/mp4">
+            <SegmentTemplate timescale="1" duration="2" initialization="init.mp4" media="v-$Number$.m4s"/>
+            <Representation id="video" bandwidth="1000" width="640" height="360"/>
+          </AdaptationSet>
+          <AdaptationSet contentType="text" mimeType="text/vtt" lang="zh">
+            <Label>中文</Label>
+            <Representation id="zh">
+              <BaseURL>captions/zh.vtt</BaseURL>
+            </Representation>
+          </AdaptationSet>
+          <AdaptationSet contentType="text" mimeType="text/vtt" lang="en">
+            <SegmentTemplate timescale="1" duration="2" media="en-$Number$.vtt" startNumber="1"/>
+            <Representation id="en" bandwidth="1"/>
+          </AdaptationSet>
+          <AdaptationSet contentType="text" mimeType="application/ttml+xml" lang="ja">
+            <Representation id="ja">
+              <SegmentList>
+                <SegmentURL media="ja-1.xml"/>
+                <SegmentURL media="ja-2.xml"/>
+              </SegmentList>
+            </Representation>
+          </AdaptationSet>
+          <AdaptationSet contentType="text" mimeType="application/mp4" codecs="stpp.ttml.im1t" lang="de">
+            <Representation id="stpp" bandwidth="1">
+              <SegmentTemplate timescale="1" duration="2" initialization="sinit.mp4" media="s-$Number$.m4s"/>
+            </Representation>
+          </AdaptationSet>
+        </Period>
+      `),
+      MANIFEST,
+    )
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+    expect(parsed.subtitles.map((track) => track.id)).toEqual(['zh', 'en', 'ja', 'stpp'])
+    expect(parsed.subtitles[0]).toMatchObject({
+      label: '中文（zh）',
+      language: 'zh',
+      format: 'vtt',
+      urls: ['https://origin.example/dash/captions/zh.vtt'],
+    })
+    expect(parsed.subtitles[1]).toMatchObject({
+      language: 'en',
+      format: 'vtt',
+      urls: ['https://origin.example/dash/en-1.vtt', 'https://origin.example/dash/en-2.vtt'],
+    })
+    expect(parsed.subtitles[2]).toMatchObject({
+      format: 'ttml',
+      urls: ['https://origin.example/dash/ja-1.xml', 'https://origin.example/dash/ja-2.xml'],
+    })
+    expect(parsed.subtitles[3]?.urls).toEqual([])
+    expect(parsed.subtitles[3]?.note).toBe(SUBTITLE_TEXT.unsupportedStpp)
+    const plan = planDashDownload(parsed, 'video')
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.urls).toEqual([
+      'https://origin.example/dash/init.mp4',
+      'https://origin.example/dash/v-1.m4s',
+      'https://origin.example/dash/v-2.m4s',
+    ])
+    expect(plan.urls.some((url) => url.includes('.vtt') || url.includes('.xml'))).toBe(false)
   })
 })

@@ -12,6 +12,7 @@ import { clearBilibiliRefererOnStartup, listenForBilibili } from './bilibili'
 import { listenForDash } from './dash'
 import { listenForDownload } from './download'
 import { listenForHls } from './hls'
+import { listenForSubtitles } from './subtitles'
 import { listenForOffscreenJobs } from './offscreen-jobs'
 import { initDownloadQueue } from './queue'
 import { addMedia, fillMediaSize, initStore } from './store'
@@ -23,6 +24,7 @@ listenForOffscreenJobs()
 initDownloadQueue()
 listenForHls()
 listenForDash()
+listenForSubtitles()
 listenForBilibili()
 void clearBilibiliRefererOnStartup()
 

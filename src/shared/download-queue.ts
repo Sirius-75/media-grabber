@@ -38,6 +38,8 @@ export interface HlsQueueJob extends QueueJobBase {
   mediaUrl: string
   /** 这是直播录制。派发时走 HLS_OFFSCREEN_LIVE_START，而不是点播下载。 */
   live?: boolean
+  /** 为 true 时录进点击时窗口里已有的分片。缺省表示从直播边缘开始。 */
+  includeExisting?: boolean
 }
 
 export interface DashQueueJob extends QueueJobBase {
@@ -242,9 +244,10 @@ function parseJob(value: unknown): QueueJob | undefined {
   if (!base) return undefined
   if (value.kind === 'hls') {
     if (!nonEmptyString(value.mediaUrl)) return undefined
-    if (!optionalBoolean(value.live)) return undefined
+    if (!optionalBoolean(value.live) || !optionalBoolean(value.includeExisting)) return undefined
     const job: HlsQueueJob = { ...base, kind: 'hls', mediaUrl: value.mediaUrl.trim() }
     if (value.live === true) job.live = true
+    if (value.includeExisting === true) job.includeExisting = true
     return job
   }
   if (value.kind === 'dash') {

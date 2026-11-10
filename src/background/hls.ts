@@ -72,9 +72,21 @@ async function forwardDownload(playlistUrl: string, mediaUrl: string, tabId: num
   return enqueueHlsJob({ key: playlistUrl, mediaUrl, tabId, ...context })
 }
 
-async function forwardLive(playlistUrl: string, mediaUrl: string, tabId: number | undefined): Promise<unknown> {
+async function forwardLive(
+  playlistUrl: string,
+  mediaUrl: string,
+  tabId: number | undefined,
+  includeExisting: boolean,
+): Promise<unknown> {
   const context = await downloadContext(tabId, playlistUrl)
-  return enqueueHlsJob({ key: playlistUrl, mediaUrl, live: true, tabId, ...context })
+  return enqueueHlsJob({
+    key: playlistUrl,
+    mediaUrl,
+    live: true,
+    includeExisting,
+    tabId,
+    ...context,
+  })
 }
 
 async function liveInspect(message: HlsLiveInspectMessage): Promise<unknown> {
@@ -100,7 +112,7 @@ async function liveStart(message: HlsLiveStartMessage): Promise<unknown> {
     warn('打开 offscreen 失败', error)
     return { ok: false, error: HLS_TEXT.offscreen }
   }
-  const started = await forwardLive(playlistUrl, mediaUrl, message.tabId)
+  const started = await forwardLive(playlistUrl, mediaUrl, message.tabId, message.includeExisting === true)
   return started ?? { ok: false, error: HLS_TEXT.offscreen }
 }
 

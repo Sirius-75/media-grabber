@@ -47,7 +47,10 @@ import {
   type HlsInspectMessage,
   type HlsLiveInspectMessage,
   type HlsLiveStartMessage,
+  type SubtitleDownloadMessage,
 } from '../shared/messages'
+import { PREFERENCES_STORAGE_KEY, readPreferences } from '../shared/preferences'
+import type { SubtitleTrackView } from '../shared/subtitles'
 import type { MediaItem } from '../shared/types'
 import {
   bindListActions,
@@ -58,6 +61,7 @@ import {
   renderList,
   setRowStatus,
   statusFromDownloadResponse,
+  type ShownSubtitles,
 } from './view.ts'
 
 const countEl = document.querySelector('#count')
@@ -77,10 +81,37 @@ let queue: DownloadQueueState = emptyQueue()
 let retries: DownloadRetryMap = {}
 /** 用户在清晰度列表里点过的地址。DASH 里存的是 Representation id。重画时不要跳回默认项。 */
 const preferredVariant = new Map<string, string>()
+const subtitleState = new Map<string, ShownSubtitles>()
+const subtitleRequested = new Set<string>()
 
 function wantsSeparate(): boolean {
   const box = document.querySelector('#separate-media')
   return box instanceof HTMLInputElement && box.checked
+}
+
+/** 勾上才把点击时窗口里已有的分片录进去。默认不勾，从直播边缘开始。 */
+function wantsExistingLive(): boolean {
+  const box = document.querySelector('#include-existing-live')
+  return box instanceof HTMLInputElement && box.checked
+}
+
+async function loadPreferences(): Promise<void> {
+  const box = document.querySelector('#include-existing-live')
+  if (!(box instanceof HTMLInputElement)) return
+  try {
+    const stored = await chrome.storage.local.get(PREFERENCES_STORAGE_KEY)
+    box.checked = readPreferences(stored[PREFERENCES_STORAGE_KEY]).includeExistingLiveSegments
+  } catch {
+    box.checked = false
+  }
+}
+
+function persistPreferences(): void {
+  const box = document.querySelector('#include-existing-live')
+  if (!(box instanceof HTMLInputElement)) return
+  void chrome.storage.local
+    .set({ [PREFERENCES_STORAGE_KEY]: { includeExistingLiveSegments: box.checked } })
+    .catch(() => undefined)
 }
 
 function showBanner(text: string): void {
@@ -104,7 +135,7 @@ function paint(): void {
   countEl.textContent = `共 ${items.length} 条`
   clearButton.disabled = tabId === undefined || items.length === 0
   paintPageTitle()
-  renderList(listEl, items, statuses, jobs, preferredVariant, dashJobs, bilibiliJobs, queue)
+  renderList(listEl, items, statuses, jobs, preferredVariant, dashJobs, bilibiliJobs, queue, subtitleState)
   const isEmpty = items.length === 0
   emptyEl.hidden = !isEmpty
   listEl.hidden = isEmpty
@@ -518,6 +549,7 @@ async function startHlsLive(url: string, mediaUrl: string, warning?: string): Pr
   })
   paint()
   const message: HlsLiveStartMessage = { type: MESSAGE_TYPE.HLS_LIVE_START, url, mediaUrl }
+  if (wantsExistingLive()) message.includeExisting = true
   if (tabId !== undefined) message.tabId = tabId
   try {
     const response = readHlsUserResponse(await chrome.runtime.sendMessage(message))
@@ -958,6 +990,84 @@ async function clearMedia(): Promise<void> {
   }
 }
 
+function isSubtitleTrack(value: unknown): value is SubtitleTrackView {
+  if (typeof value !== 'object' || value === null) return false
+  const track = value as SubtitleTrackView
+  if (typeof track.id !== 'string' || track.id.trim() === '') return false
+  if (typeof track.label !== 'string' || track.label.trim() === '') return false
+  if (track.format !== 'vtt' && track.format !== 'ttml' && track.format !== 'unsupported') return false
+  return true
+}
+
+async function refreshSubtitles(): Promise<void> {
+  const targets = items.filter((item) => {
+    if (item.kind !== 'hls' && item.kind !== 'dash') return false
+    return item.url.startsWith('http://') || item.url.startsWith('https://')
+  })
+  await Promise.all(
+    targets.map(async (item) => {
+      if (subtitleRequested.has(item.url)) return
+      subtitleRequested.add(item.url)
+      try {
+        const response: unknown = await chrome.runtime.sendMessage({
+          type: MESSAGE_TYPE.SUBTITLE_INSPECT,
+          url: item.url,
+        })
+        if (typeof response !== 'object' || response === null || !('ok' in response)) return
+        if (response.ok === false && 'error' in response && typeof response.error === 'string' && response.error.trim()) {
+          const error = response.error.trim()
+          // 自动检查失败时，只把加密 / DRM / 明确不支持留在列表上。网络失败不挡住这一行。
+          if (/加密|DRM|不支持/.test(error)) {
+            subtitleState.set(item.url, { tracks: [], error })
+            paint()
+          }
+          return
+        }
+        if (response.ok !== true || !('tracks' in response) || !Array.isArray(response.tracks)) return
+        const tracks = response.tracks.filter(isSubtitleTrack)
+        if (tracks.length === 0) return
+        subtitleState.set(item.url, { tracks })
+        paint()
+      } catch {
+        // 读不到字幕时不挡住音视频列表。
+      }
+    }),
+  )
+}
+
+async function requestSubtitle(url: string, trackId: string, format: 'vtt' | 'srt'): Promise<void> {
+  const current = subtitleState.get(url) ?? { tracks: [] }
+  subtitleState.set(url, { ...current, pendingId: trackId, message: '正在下载字幕…' })
+  paint()
+  const message: SubtitleDownloadMessage = {
+    type: MESSAGE_TYPE.SUBTITLE_DOWNLOAD,
+    url,
+    trackId,
+    format,
+  }
+  if (tabId !== undefined) message.tabId = tabId
+  try {
+    const response: unknown = await chrome.runtime.sendMessage(message)
+    const failed =
+      typeof response === 'object' &&
+      response !== null &&
+      'ok' in response &&
+      response.ok === false &&
+      'error' in response &&
+      typeof response.error === 'string'
+        ? response.error
+        : undefined
+    const ok = typeof response === 'object' && response !== null && 'ok' in response && response.ok === true
+    subtitleState.set(url, {
+      tracks: current.tracks,
+      message: ok ? `字幕已开始下载（.${format}）` : failed || '字幕下载失败',
+    })
+  } catch {
+    subtitleState.set(url, { tracks: current.tracks, message: '字幕下载失败' })
+  }
+  paint()
+}
+
 async function load(): Promise<void> {
   if (countEl instanceof HTMLElement) countEl.textContent = '正在读取…'
   if (emptyEl instanceof HTMLElement) emptyEl.hidden = true
@@ -1004,6 +1114,7 @@ async function load(): Promise<void> {
       retries = {}
     }
     paint()
+    void refreshSubtitles()
     void chrome.runtime.sendMessage({ type: MESSAGE_TYPE.HLS_SYNC }).catch(() => undefined)
     void chrome.runtime.sendMessage({ type: MESSAGE_TYPE.DASH_SYNC }).catch(() => undefined)
     void chrome.runtime.sendMessage({ type: MESSAGE_TYPE.BILIBILI_SYNC }).catch(() => undefined)
@@ -1021,6 +1132,13 @@ function start(): void {
       void clearMedia()
     })
   }
+  const includeExisting = document.querySelector('#include-existing-live')
+  if (includeExisting instanceof HTMLInputElement) {
+    includeExisting.addEventListener('change', () => {
+      persistPreferences()
+    })
+  }
+  void loadPreferences()
   bindListActions(listEl, () => items, {
     onCopy(url, button) {
       void copyUrl(url, button)
@@ -1054,6 +1172,9 @@ function start(): void {
     },
     onHlsLiveCancel(url) {
       void cancelHlsLive(url)
+    },
+    onSubtitleDownload(url, trackId, format) {
+      void requestSubtitle(url, trackId, format)
     },
     onDashDownload(url) {
       void requestDashDownload(url, false)

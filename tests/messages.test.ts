@@ -20,6 +20,8 @@ import {
   isHlsLiveStartMessage,
   isHlsLiveStopMessage,
   isHlsSyncMessage,
+  isSubtitleDownloadMessage,
+  isSubtitleInspectMessage,
   isMediaFoundMessage,
 } from '../src/shared/messages'
 
@@ -38,6 +40,8 @@ describe('消息常量', () => {
       HLS_LIVE_START: 'HLS_LIVE_START',
       HLS_LIVE_STOP: 'HLS_LIVE_STOP',
       HLS_LIVE_CANCEL: 'HLS_LIVE_CANCEL',
+      SUBTITLE_INSPECT: 'SUBTITLE_INSPECT',
+      SUBTITLE_DOWNLOAD: 'SUBTITLE_DOWNLOAD',
       DASH_INSPECT: 'DASH_INSPECT',
       DASH_DOWNLOAD: 'DASH_DOWNLOAD',
       DASH_CANCEL: 'DASH_CANCEL',
@@ -251,6 +255,43 @@ describe('HLS 消息', () => {
     )
     expect(isHlsLiveCancelMessage({ type: MESSAGE_TYPE.HLS_LIVE_CANCEL, url: ' ' })).toBe(false)
     expect(
+      isHlsLiveStartMessage({
+        type: MESSAGE_TYPE.HLS_LIVE_START,
+        url: 'https://cdn.example/live.m3u8',
+        mediaUrl: 'https://cdn.example/live.m3u8',
+        includeExisting: true,
+      }),
+    ).toBe(true)
+    expect(
+      isHlsLiveStartMessage({
+        type: MESSAGE_TYPE.HLS_LIVE_START,
+        url: 'https://cdn.example/live.m3u8',
+        mediaUrl: 'https://cdn.example/live.m3u8',
+        includeExisting: 'yes',
+      }),
+    ).toBe(false)
+    expect(isSubtitleInspectMessage({ type: MESSAGE_TYPE.SUBTITLE_INSPECT, url: 'https://cdn.example/a.m3u8' })).toBe(
+      true,
+    )
+    expect(isSubtitleInspectMessage({ type: MESSAGE_TYPE.SUBTITLE_INSPECT, url: ' ' })).toBe(false)
+    expect(
+      isSubtitleDownloadMessage({
+        type: MESSAGE_TYPE.SUBTITLE_DOWNLOAD,
+        url: 'https://cdn.example/a.m3u8',
+        trackId: 'https://cdn.example/zh.m3u8',
+        format: 'srt',
+        tabId: 2,
+      }),
+    ).toBe(true)
+    expect(
+      isSubtitleDownloadMessage({
+        type: MESSAGE_TYPE.SUBTITLE_DOWNLOAD,
+        url: 'https://cdn.example/a.m3u8',
+        trackId: 'zh',
+        format: 'ass',
+      }),
+    ).toBe(false)
+    expect(
       isExtensionMessage({
         type: MESSAGE_TYPE.HLS_LIVE_START,
         url: 'https://cdn.example/live.m3u8',
@@ -393,6 +434,15 @@ describe('isExtensionMessage', () => {
       }),
     ).toBe(true)
     expect(isExtensionMessage({ type: MESSAGE_TYPE.BILIBILI_SYNC })).toBe(true)
+    expect(isExtensionMessage({ type: MESSAGE_TYPE.SUBTITLE_INSPECT, url: 'https://cdn.example/a.m3u8' })).toBe(true)
+    expect(
+      isExtensionMessage({
+        type: MESSAGE_TYPE.SUBTITLE_DOWNLOAD,
+        url: 'https://cdn.example/a.mpd',
+        trackId: 'zh',
+        format: 'vtt',
+      }),
+    ).toBe(true)
     expect(isExtensionMessage({ type: 'NOPE' })).toBe(false)
     expect(isExtensionMessage(undefined)).toBe(false)
   })
