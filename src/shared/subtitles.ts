@@ -37,6 +37,18 @@ export function tracksFromHls(renditions: readonly HlsSubtitleRendition[]): Subt
   })
 }
 
+/**
+ * 自动检查失败时，只把真正的字幕问题留在列表上。
+ * DRM / ContentProtection，以及字幕格式本身不支持，才显示。
+ * 直播、字节范围、变量替换这类整份清单的拒绝，不写进字幕区域。
+ */
+export function shouldShowAutomaticSubtitleError(error: string): boolean {
+  const text = error.trim()
+  if (!text) return false
+  if (text.includes('ContentProtection') || text.includes('DRM')) return true
+  return text.includes('字幕格式') && text.includes('不支持')
+}
+
 export function tracksFromDash(manifest: DashManifest): SubtitleTrackView[] {
   return manifest.subtitles.map((track) => {
     const view: SubtitleTrackView = {
@@ -89,6 +101,7 @@ export function readHlsSubtitleSource(text: string, playlistUrl: string): HlsSub
   if (!parsed.ok) return parsed
   if (parsed.kind === 'master') return { ok: false, error: HLS_TEXT.nestedMaster }
   if (parsed.kind === 'live') return { ok: false, error: SUBTITLE_TEXT.live }
+  if (parsed.media.initUrl) return { ok: false, error: SUBTITLE_TEXT.unsupportedWvtt }
   if (parsed.media.aes128) return { ok: false, error: SUBTITLE_TEXT.encrypted }
   if (parsed.media.segments.length === 0) return { ok: false, error: SUBTITLE_TEXT.empty }
   return {

@@ -332,8 +332,36 @@ describe('直播从点击时的边缘开始', () => {
     const result = await harness.recorder.run()
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(textOf(result.parts)).toBe('c')
-    expect(harness.segmentCalls).toEqual(['https://cdn.example/live/c.ts'])
+    expect(textOf(result.parts)).toBe('abc')
+    expect(harness.segmentCalls).toEqual([
+      'https://cdn.example/live/a.ts',
+      'https://cdn.example/live/b.ts',
+      'https://cdn.example/live/c.ts',
+    ])
+  })
+
+  it('media sequence 大幅回退时重新按边缘对齐，已经下过的地址不再请求', async () => {
+    const harness = makeHarness({
+      includeExistingSegments: false,
+      playlists: [
+        playlist(500, ['a.ts', 'b.ts']),
+        playlist(0, ['a.ts', 'b.ts', 'c.ts']),
+        playlist(0, ['a.ts', 'b.ts', 'c.ts'], { end: true }),
+      ],
+      segments: {
+        'https://cdn.example/live/a.ts': bytesOf('a'),
+        'https://cdn.example/live/b.ts': bytesOf('b'),
+        'https://cdn.example/live/c.ts': bytesOf('c'),
+      },
+    })
+    const result = await harness.recorder.run()
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(textOf(result.parts)).toBe('bc')
+    expect(harness.segmentCalls).toEqual([
+      'https://cdn.example/live/b.ts',
+      'https://cdn.example/live/c.ts',
+    ])
   })
 
   it('fMP4 仍然先取初始化段，媒体分片只留边缘那一片', async () => {

@@ -541,3 +541,15 @@ HLS 主清单解析 `EXT-X-MEDIA TYPE=SUBTITLES`。坏掉的字幕地址只跳�
 DASH 在 `parseMpd` 里另外收集 `contentType=text` 或 `text/vtt`、TTML/IMSC 的 AdaptationSet。单文件 BaseURL 和 SegmentTemplate / SegmentList 都可以。这些地址不进入 `planDashDownload`，音视频该怎么下还怎么下。`codecs` 含 `stpp`，或包在 `application/mp4` 里的 wvtt，只显示「暂不支持」，不去拆 mp4。整份清单有 `ContentProtection` 时仍然整份拒绝。
 
 弹窗打开后向 offscreen 读一次清单，把语言或名字和「下载字幕」画在对应的 HLS / DASH 行上。格式默认 `.vtt`，也可以选 `.srt`。文件名用原来的 `buildDownloadFilename`，清晰度那一段改放语言代码。字幕下载不占音视频队列的两个槽位，请求头仍然不加。
+
+## 21. 版本 0.3.3：字幕选择、检查范围和直播对齐
+
+没有新增权限，也没有新增运行时依赖。
+
+字幕格式按每条轨道记住。进度刷新重画列表时恢复 `.srt` 或 `.vtt`，不再每次回到 `.vtt`。自动检查只把 DRM、ContentProtection，以及字幕格式不支持写在字幕区域；直播、字节范围、变量替换保持沉默。查过的清单记在 `chrome.storage.session`，关掉弹窗再打开不再请求一次。
+
+WebVTT 合成以第一段 MPEGTS 为基线，后面的 tick 比基线小了超过 2^32 时加上 2^33，避免 33 位回绕把后一段丢掉。写出 `.vtt` 时保留 cue 原文；只有 `.srt` 才解码转义，并只留下 `<i>`、`<b>`、`<u>`。分片带时长时，用累计起点判断相对时间，不再要求第一句必须落在 1 秒内。
+
+HLS 字幕清单如果带 `EXT-X-MAP`，直接返回 fMP4/wvtt 不支持。DASH 里 `application/mp4` 且 codecs 含 `stpp` 或 `wvtt`、又没有 `contentType=text` 的轨，同样显示已有的不支持说明。SegmentTemplate 展开地址只留一份，音视频和字幕共用。
+
+直播录制：点击后第一轮是空窗时，下一份非空窗口全部收录。media sequence 掉到比窗口长度再多两片还要低时，当成重置并重新按边缘对齐，已经请求过的地址不再下一次。

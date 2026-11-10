@@ -343,6 +343,30 @@ describe('解析 MPD', () => {
     })
     expect(parsed.subtitles[3]?.urls).toEqual([])
     expect(parsed.subtitles[3]?.note).toBe(SUBTITLE_TEXT.unsupportedStpp)
+
+    const packed = parseMpd(
+      mpd(`
+        <Period duration="PT4S">
+          <AdaptationSet mimeType="video/mp4">
+            <SegmentTemplate timescale="1" duration="2" initialization="init.mp4" media="v-$Number$.m4s"/>
+            <Representation id="video" bandwidth="1000" width="640" height="360"/>
+          </AdaptationSet>
+          <AdaptationSet mimeType="application/mp4" codecs="wvtt">
+            <Representation id="wvtt" bandwidth="1"/>
+          </AdaptationSet>
+          <AdaptationSet mimeType="application/mp4" codecs="stpp">
+            <Representation id="stpp-bare" bandwidth="1"/>
+          </AdaptationSet>
+        </Period>
+      `),
+      MANIFEST,
+    )
+    expect(packed.ok).toBe(true)
+    if (!packed.ok) return
+    expect(packed.subtitles.map((track) => track.id)).toEqual(['wvtt', 'stpp-bare'])
+    expect(packed.subtitles[0]?.note).toBe(SUBTITLE_TEXT.unsupportedWvtt)
+    expect(packed.subtitles[1]?.note).toBe(SUBTITLE_TEXT.unsupportedStpp)
+    expect(packed.videos.map((track) => track.id)).toEqual(['video'])
     const plan = planDashDownload(parsed, 'video')
     expect(plan.ok).toBe(true)
     if (!plan.ok) return

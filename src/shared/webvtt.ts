@@ -2,10 +2,13 @@
  * 把多段 WebVTT 合成一条连续字幕，并可选转成 SRT。
  * 不访问 chrome，也不发请求。
  *
- * X-TIMESTAMP-MAP 的 MPEGTS 是 90 kHz。LOCAL 对应该时间轴上的字幕时间。
- * 第一段的（MPEGTS/90000 − LOCAL）当作 0 点，后面的分片都减去这个偏移，
- * 这样时间轴从 0 开始，和归零后的视频对齐。
- * 没有时间戳映射、但每一段的 cue 又从 0 附近重新开始时，按前面各段的时长顺延。
+ * X-TIMESTAMP-MAP 的 MPEGTS 是 90 kHz，33 位，会在 2^33 回绕。
+ * LOCAL 对应该时间轴上的字幕时间。第一段的（MPEGTS/90000 − LOCAL）当作 0 点，
+ * 后面的分片都减去这个偏移，这样时间轴从 0 开始，和归零后的视频对齐。
+ * 若后面某段的 tick 比第一段小了不止 2^32，就先加上 2^33 再算偏移。
+ * 没有时间戳映射时：分片时长已知，就用前面各段时长的累计起点判断这一段是不是相对时间；
+ * 没有时长时，仍只在第一句落在前一段内部且不到 1 秒时顺延。
+ * 写出 VTT 时保留 cue 原文（转义和样式标签都不动）。只有转成 SRT 时才解码，并去掉除 i、b、u 以外的标签。
  */
 
 export const SUBTITLE_TEXT = {
@@ -34,6 +37,10 @@ interface Cue {
 }
 
 const TIMESTAMP = /^(?:(\d+):)?(\d{1,3}):(\d{2})[.](\d{1,3})$/
+/** MPEG-TS 时间戳是 33 位，回绕周期是 2^33 个 90 kHz tick。 */
+const MPEGTS_MODULO = 2 ** 33
+/** 比基线小了超过半个周期，才当成回绕，而不是时钟往回跳。 */
+const MPEGTS_WRAP_GAP = 2 ** 32
 
 /** 解析 HH:MM:SS.mmm 或 MM:SS.mmm。毫秒不足三位时按左边补齐。 */
 export function parseVttTimestamp(value: string): number | undefined {
@@ -60,7 +67,7 @@ function formatTimestamp(ms: number, separator: '.' | ','): string {
   return `${pad(hours, 2)}:${pad(minutes, 2)}:${pad(seconds, 2)}${separator}${pad(millis, 3)}`
 }
 
-function mapOffsetMs(header: string): number | undefined {
+function readTimestampMap(header: string): { ticks: number; localMs: number } | undefined {
   const line = /X-TIMESTAMP-MAP=([^\r\n]+)/i.exec(header)
   if (!line?.[1]) return undefined
   const attrs = line[1]
@@ -71,7 +78,13 @@ function mapOffsetMs(header: string): number | undefined {
   if (localMs === undefined) return undefined
   const ticks = Number(mpegts[1])
   if (!Number.isFinite(ticks)) return undefined
-  return Math.round(ticks / 90) - localMs
+  return { ticks, localMs }
+}
+
+/** 以第一段的 tick 为基线。后面的 tick 掉到基线以下超过 2^32 时，补上一个 33 位周期。 */
+function unwrapMpegtsTicks(ticks: number, baseline: number): number {
+  if (baseline - ticks > MPEGTS_WRAP_GAP) return ticks + MPEGTS_MODULO
+  return ticks
 }
 
 function decodeEntities(value: string): string {
@@ -83,7 +96,19 @@ function decodeEntities(value: string): string {
     .replace(/&amp;/g, '&')
 }
 
-function cuePayload(raw: string): string {
+/** VTT 原文。转义和样式标签都留着，写回文件时才能和源文件一致。 */
+function rawCuePayload(raw: string): string {
+  return raw.replace(/\s+\n/g, '\n').trim()
+}
+
+/** SRT 只保留 i、b、u。其它标签去掉，HTML 转义先还原。 */
+function srtCuePayload(raw: string): string {
+  const decoded = decodeEntities(raw)
+  const kept = decoded.replace(/<[^>]+>/g, (tag) => (/^<\/?(i|b|u)(\s[^>]*)?>$/i.test(tag) ? tag : ''))
+  return kept.replace(/\s+\n/g, '\n').trim()
+}
+
+function plainCuePayload(raw: string): string {
   const withoutTags = raw.replace(/<[^>]+>/g, '')
   return decodeEntities(withoutTags).replace(/\s+\n/g, '\n').trim()
 }
@@ -117,14 +142,14 @@ function parseCueBlock(lines: string[]): Cue | undefined {
   const start = parseVttTimestamp(match[1])
   const end = parseVttTimestamp(match[2])
   if (start === undefined || end === undefined || end < start) return undefined
-  const payload = cuePayload(lines.slice(timingIndex + 1).join('\n'))
+  const payload = rawCuePayload(lines.slice(timingIndex + 1).join('\n'))
   if (!payload) return undefined
   return { startMs: start, endMs: end, payload, settings: (match[3] ?? '').trim() }
 }
 
-function parseVtt(text: string): { mapOffsetMs?: number; cues: Cue[] } {
+function parseVtt(text: string): { ticks?: number; localMs?: number; cues: Cue[] } {
   const { header, blocks } = parseBlocks(text)
-  const offset = mapOffsetMs(header)
+  const map = readTimestampMap(header)
   const cues: Cue[] = []
   for (const block of blocks) {
     const head = (block[0] ?? '').trim().toUpperCase()
@@ -132,7 +157,7 @@ function parseVtt(text: string): { mapOffsetMs?: number; cues: Cue[] } {
     const cue = parseCueBlock(block)
     if (cue) cues.push(cue)
   }
-  return offset === undefined ? { cues } : { mapOffsetMs: offset, cues }
+  return map ? { ticks: map.ticks, localMs: map.localMs, cues } : { cues }
 }
 
 function sameCue(left: Cue, right: Cue): boolean {
@@ -142,20 +167,45 @@ function sameCue(left: Cue, right: Cue): boolean {
 /**
  * 合成一段连续的 WebVTT。时间轴减去第一段的 MPEGTS 偏移，使起点为 0。
  */
+function relativeShift(
+  cues: readonly Cue[],
+  placed: readonly Cue[],
+  segmentDurationMs: number | undefined,
+  cumulativeMs: number,
+): number {
+  if (cues.length === 0 || placed.length === 0) return 0
+  const minStart = Math.min(...cues.map((cue) => cue.startMs))
+  if (segmentDurationMs !== undefined && cumulativeMs > 0) {
+    // 这一段的时间还停在累计起点之前，说明它是从本段 0 点起算的。
+    if (minStart + 500 < cumulativeMs) return cumulativeMs
+    return 0
+  }
+  const prevEnd = placed.reduce((max, cue) => Math.max(max, cue.endMs), 0)
+  if (prevEnd > 200 && minStart < prevEnd - 200 && minStart < 1000) {
+    return cumulativeMs > 0 ? cumulativeMs : prevEnd
+  }
+  return 0
+}
+
 export function mergeWebVttSegments(segments: readonly VttSegmentInput[]): string {
   const placed: Cue[] = []
   let baseline: number | undefined
+  let baselineTicks: number | undefined
   let cumulativeMs = 0
   for (const segment of segments) {
     const parsed = parseVtt(segment.text)
-    if (baseline === undefined && parsed.mapOffsetMs !== undefined) baseline = parsed.mapOffsetMs
-    let shift = parsed.mapOffsetMs ?? 0
-    if (parsed.mapOffsetMs === undefined && parsed.cues.length > 0 && placed.length > 0) {
-      const minStart = Math.min(...parsed.cues.map((cue) => cue.startMs))
-      const prevEnd = placed.reduce((max, cue) => Math.max(max, cue.endMs), 0)
-      if (prevEnd > 200 && minStart < prevEnd - 200 && minStart < 1000) {
-        shift = cumulativeMs > 0 ? cumulativeMs : prevEnd
-      }
+    const segmentDurationMs =
+      segment.duration !== undefined && Number.isFinite(segment.duration) && segment.duration > 0
+        ? Math.round(segment.duration * 1000)
+        : undefined
+    let shift = 0
+    if (parsed.ticks !== undefined && parsed.localMs !== undefined) {
+      if (baselineTicks === undefined) baselineTicks = parsed.ticks
+      const ticks = unwrapMpegtsTicks(parsed.ticks, baselineTicks)
+      shift = Math.round(ticks / 90) - parsed.localMs
+      if (baseline === undefined) baseline = shift
+    } else {
+      shift = relativeShift(parsed.cues, placed, segmentDurationMs, cumulativeMs)
     }
     for (const cue of parsed.cues) {
       const next: Cue = {
@@ -166,10 +216,7 @@ export function mergeWebVttSegments(segments: readonly VttSegmentInput[]): strin
       }
       if (!placed.some((existing) => sameCue(existing, next))) placed.push(next)
     }
-    const durationMs =
-      segment.duration !== undefined && Number.isFinite(segment.duration) && segment.duration > 0
-        ? Math.round(segment.duration * 1000)
-        : parsed.cues.reduce((max, cue) => Math.max(max, cue.endMs), 0)
+    const durationMs = segmentDurationMs ?? parsed.cues.reduce((max, cue) => Math.max(max, cue.endMs), 0)
     cumulativeMs += durationMs
   }
 
@@ -202,12 +249,16 @@ export function mergeWebVttSegments(segments: readonly VttSegmentInput[]): strin
 export function webVttToSrt(vtt: string): string {
   const parsed = parseVtt(vtt)
   const lines: string[] = []
-  parsed.cues.forEach((cue, index) => {
-    lines.push(String(index + 1))
+  let index = 0
+  for (const cue of parsed.cues) {
+    const payload = srtCuePayload(cue.payload)
+    if (!payload) continue
+    index += 1
+    lines.push(String(index))
     lines.push(`${formatTimestamp(cue.startMs, ',')} --> ${formatTimestamp(cue.endMs, ',')}`)
-    lines.push(cue.payload)
+    lines.push(payload)
     lines.push('')
-  })
+  }
   return `${lines.join('\n').trim()}\n`
 }
 
@@ -257,7 +308,7 @@ export function ttmlToVtt(xml: string): string {
       if (duration !== undefined) endMs = startMs + duration
     }
     if (endMs === undefined || endMs <= startMs) continue
-    const payload = cuePayload(
+    const payload = plainCuePayload(
       (match[2] ?? '').replace(/<br\s*\/?>/gi, '\n').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1'),
     )
     if (!payload) continue
