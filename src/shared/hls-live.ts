@@ -3,6 +3,8 @@
  *
  * 轮询用 setTimeout 链（每次只安排下一次），不用 setInterval。
  * 按 EXT-X-MEDIA-SEQUENCE 去重：滚动窗口里重复出现的分片不会再下一次。
+ * 默认从直播边缘开始：第一份窗口里只收录序号最大的分片，更早的跳过。
+ * includeExistingSegments 为 true 时改回旧行为，窗口里已有的分片都写入。
  * 支持点播已有的标准 AES-128：每一片下载后立刻解密，内存里只留明文。
  * 已录字节达到上限、清单出现 EXT-X-ENDLIST、长时间没有新分片、清单连续失败时自动停止。
  * 用户点「停止并保存」只停轮询，已经下到的分片仍然交给调用方保存；「取消」才丢弃。
@@ -84,7 +86,33 @@ export interface HlsLiveOptions {
   maxBytes?: number
   stallMs?: number
   maxManifestFailures?: number
+  /**
+   * 为 true 时，点击那一刻清单窗口里已有的分片也写入文件（旧行为）。
+   * 缺省或 false：从直播边缘开始，只保留窗口里序号最大的那一片，更早的跳过。
+   */
+  includeExistingSegments?: boolean
   onUpdate?: (update: HlsLiveUpdate) => void
+}
+
+/**
+ * 第一份出现分片的清单从哪个 media sequence 开始收录。
+ * edge：直播边缘，只从序号最大的那一片开始（大约多录或少录一个分片）。
+ * all：窗口里已有的分片都收录。
+ * 没有带序号的分片时返回 undefined。
+ */
+export function firstLiveSequence(
+  segments: readonly { sequence?: number }[],
+  mode: 'edge' | 'all',
+): number | undefined {
+  let first: number | undefined
+  let last: number | undefined
+  for (const segment of segments) {
+    const sequence = segment.sequence
+    if (sequence === undefined) continue
+    if (first === undefined || sequence < first) first = sequence
+    if (last === undefined || sequence > last) last = sequence
+  }
+  return mode === 'all' ? first : last
 }
 
 function clampPollMs(targetDuration: number): number {
@@ -176,6 +204,9 @@ export class HlsLiveRecorder {
   private manifestFailures = 0
   private stopRequested = false
   private started = false
+  /** 已经根据第一份非空窗口决定过起点。之后只按序号去重。 */
+  private anchored = false
+  private readonly includeExistingSegments: boolean
 
   constructor(options: HlsLiveOptions) {
     this.options = options
@@ -185,6 +216,7 @@ export class HlsLiveRecorder {
     this.maxBytes = options.maxBytes ?? LIVE_HARD_BYTE_LIMIT
     this.stallMs = options.stallMs ?? LIVE_STALL_MS
     this.maxManifestFailures = options.maxManifestFailures ?? LIVE_MAX_MANIFEST_FAILURES
+    this.includeExistingSegments = options.includeExistingSegments === true
     this.fetchPlaylist =
       options.fetchPlaylist ??
       ((url, signal) =>
@@ -316,6 +348,7 @@ export class HlsLiveRecorder {
       }
     }
 
+    this.anchor(media)
     for (const segment of media.segments) {
       if (this.cancelSignal.aborted) return {}
       const sequence = segment.sequence
@@ -349,6 +382,19 @@ export class HlsLiveRecorder {
       if (this.bytes >= this.maxBytes) return { reason: 'size-limit' }
     }
     return {}
+  }
+
+  /**
+   * 只在第一次看到带序号的分片时决定起点。
+   * 默认对齐直播边缘：跳过窗口里更早的分片，保留序号最大的一片。
+   * 初始化段不在这里跳过，fMP4 仍然需要它才能播放，保存时照旧做 tfdt 归零。
+   */
+  private anchor(media: HlsMedia): void {
+    if (this.anchored || this.nextSequence !== undefined) return
+    const start = firstLiveSequence(media.segments, this.includeExistingSegments ? 'all' : 'edge')
+    if (start === undefined) return
+    this.anchored = true
+    if (!this.includeExistingSegments) this.nextSequence = start
   }
 
   private pushPart(bytes: Uint8Array): boolean {

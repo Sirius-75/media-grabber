@@ -18,6 +18,7 @@ import { decryptDownloadedParts, loadAes128Keys } from '../shared/hls-aes'
 import { downloadSegmentsInOrder } from '../shared/hls-download'
 import { fetchPlaylistText, fetchSegmentBytes } from '../shared/hls-fetch'
 import { HlsLiveRecorder, liveRecordingText } from '../shared/hls-live'
+import { downloadSubtitle, inspectSubtitles, type SubtitleDownloadRequest } from './subtitle-task'
 import { planHlsSave, type HlsSavePlan } from '../shared/hls-remux'
 import { transmuxTsSegment } from '../shared/hls-remux-mux'
 import {
@@ -585,6 +586,8 @@ interface LiveDownloadRequest {
   mediaUrl: string
   title?: string
   index?: number
+  /** 为 true 时把点击时窗口里已有的分片也录进去。缺省从直播边缘开始。 */
+  includeExisting?: boolean
 }
 
 function readLiveDownload(value: Record<string, unknown>): LiveDownloadRequest | undefined {
@@ -596,6 +599,7 @@ function readLiveDownload(value: Record<string, unknown>): LiveDownloadRequest |
   }
   if (typeof value.title === 'string' && value.title.trim()) request.title = value.title
   if (typeof value.index === 'number' && Number.isInteger(value.index) && value.index >= 1) request.index = value.index
+  if (value.includeExisting === true) request.includeExisting = true
   return request
 }
 
@@ -640,6 +644,7 @@ async function runHlsLive(request: LiveDownloadRequest, controller: AbortControl
     const recorder = new HlsLiveRecorder({
       playlistUrl: request.mediaUrl,
       cancelSignal: signal,
+      includeExistingSegments: request.includeExisting === true,
       onUpdate(update) {
         if (!stillCurrent(controller)) return
         writeJobLater(
@@ -1158,6 +1163,29 @@ export function startOffscreen(): void {
       sendResponse(cancelBilibili(message.key.trim()))
       return undefined
     }
+    if (message.type === 'SUBTITLE_OFFSCREEN_INSPECT') {
+      if (typeof message.playlistUrl !== 'string' || message.playlistUrl.trim() === '') {
+        sendResponse({ ok: false, error: HLS_TEXT.badPlaylistUrl })
+        return undefined
+      }
+      void inspectSubtitles(message.playlistUrl.trim()).then(sendResponse, (error: unknown) => {
+        warn('检查字幕失败', error)
+        sendResponse({ ok: false, error: inspectFailureMessage(error) })
+      })
+      return true
+    }
+    if (message.type === 'SUBTITLE_OFFSCREEN_DOWNLOAD') {
+      const request = readSubtitleDownload(message)
+      if (!request) {
+        sendResponse({ ok: false, error: '下载请求无效' })
+        return undefined
+      }
+      void downloadSubtitle(request).then(sendResponse, (error: unknown) => {
+        warn('下载字幕失败', error)
+        sendResponse({ ok: false, error: inspectFailureMessage(error) })
+      })
+      return true
+    }
     if (message.type === 'DASH_OFFSCREEN_SYNC' || message.type === 'HLS_OFFSCREEN_SYNC') {
       const response: { ok: true; activeKey?: string; activeKeys: string[] } = {
         ok: true,
@@ -1170,6 +1198,20 @@ export function startOffscreen(): void {
     }
     return undefined
   })
+}
+
+function readSubtitleDownload(value: Record<string, unknown>): SubtitleDownloadRequest | undefined {
+  if (typeof value.playlistUrl !== 'string' || value.playlistUrl.trim() === '') return undefined
+  if (typeof value.trackId !== 'string' || value.trackId.trim() === '') return undefined
+  if (value.format !== 'vtt' && value.format !== 'srt') return undefined
+  const request: SubtitleDownloadRequest = {
+    playlistUrl: value.playlistUrl.trim(),
+    trackId: value.trackId.trim(),
+    format: value.format,
+  }
+  if (typeof value.title === 'string' && value.title.trim()) request.title = value.title.trim()
+  if (typeof value.index === 'number' && Number.isInteger(value.index) && value.index >= 1) request.index = value.index
+  return request
 }
 
 function shouldStart(): boolean {

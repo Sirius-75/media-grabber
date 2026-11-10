@@ -523,3 +523,21 @@ V4-1 到 V4-5 全部完成，版本升到 0.3.0：下载文件名带清晰度、
 只改 `tfdt` 的 4 / 8 字节，不重编码，也不动 `mdat`。为了不在内存里再复制整份文件，解析和校验全部通过后原地改字节；解析失败时一个字节都不改，`planHlsSave` 原样保存，下载仍然成功。因为是原地修改，超过 `HLS_REMUX_MAX_INPUT_BYTES` 的长直播录制也照样归零。TS→mp4（mux.js 路径）本来就从 0 开始，不动。
 
 真实测试用 ffmpeg 生成带 A/V 的碎片 fMP4，把时间轴抬到 46560 秒后归零，检查 ffprobe 起点约为 0、时长不变、ffmpeg 解码零错误；没有 ffmpeg 时自动跳过。单元测试覆盖 version 0/1、多轨相对偏移、已经为 0、坏数据和 `planHlsSave` 回退。
+
+## 20. 版本 0.3.2：直播从点击时开始，以及字幕下载
+
+没有新增权限，也没有新增运行时依赖。Referer 规则仍只给 B 站下载用。不处理 DRM，不绕过加密。点播的 HLS / DASH 下载路径不变。
+
+### 直播起点
+
+`HlsLiveRecorder` 以前会把点击时滚动窗口里的全部分片都写进文件，所以一段 10 秒的录制可能得到大约 19 秒。现在默认在第一份出现分片的清单上，把起点设成 media sequence 最大的那一片（直播边缘），更早的跳过。之后仍按序号去重，只追加新分片。误差大约一个分片。fMP4 的初始化段照旧先下载，保存时仍走 `planHlsSave` 里的 `tfdt` 归零。TS 直播也走同一起点，停止后仍转封装。
+
+弹窗里「录制时包含清单里已有的分片」默认不勾。勾上之后把 `includeExisting` 传给录制任务，恢复旧行为。开关存在 `chrome.storage.local` 的 `media-grabber-preferences`，关掉浏览器也还在。没有这个字段时按从边缘开始处理。
+
+### 字幕
+
+HLS 主清单解析 `EXT-X-MEDIA TYPE=SUBTITLES`。坏掉的字幕地址只跳过这一条，不让视频清单解析失败。下载时再读字幕媒体清单：WebVTT 分片按顺序合成一个文件。`X-TIMESTAMP-MAP` 的 MPEGTS（90 kHz）减去 LOCAL，第一段的这个偏移当作 0，后面的分片用同一条时间轴，这样和归零后的视频对齐。没有映射、但每一段 cue 又从 0 附近重新开始时，按前面各段的时长顺延。已经是绝对时间的 cue 不再移动。加密（包括 AES-128）、DRM、没有 `EXT-X-ENDLIST` 的直播字幕直接用中文拒绝，不去取密钥。
+
+DASH 在 `parseMpd` 里另外收集 `contentType=text` 或 `text/vtt`、TTML/IMSC 的 AdaptationSet。单文件 BaseURL 和 SegmentTemplate / SegmentList 都可以。这些地址不进入 `planDashDownload`，音视频该怎么下还怎么下。`codecs` 含 `stpp`，或包在 `application/mp4` 里的 wvtt，只显示「暂不支持」，不去拆 mp4。整份清单有 `ContentProtection` 时仍然整份拒绝。
+
+弹窗打开后向 offscreen 读一次清单，把语言或名字和「下载字幕」画在对应的 HLS / DASH 行上。格式默认 `.vtt`，也可以选 `.srt`。文件名用原来的 `buildDownloadFilename`，清晰度那一段改放语言代码。字幕下载不占音视频队列的两个槽位，请求头仍然不加。

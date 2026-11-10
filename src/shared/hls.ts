@@ -173,6 +173,14 @@ export interface HlsVariant {
   separateAudio: boolean
 }
 
+/** 主清单里 EXT-X-MEDIA TYPE=SUBTITLES 的一条。URI 是字幕媒体清单或单个 WebVTT。 */
+export interface HlsSubtitleRendition {
+  url: string
+  name: string
+  language?: string
+  groupId?: string
+}
+
 /** 一个分片对应的 AES-128 参数。密钥字节不在这里，下载时再按 keyUrl 去取。 */
 export interface HlsAes128 {
   keyUrl: string
@@ -210,7 +218,7 @@ export interface HlsLiveMedia extends HlsMedia {
 }
 
 export type HlsPlaylist =
-  | { ok: true; kind: 'master'; variants: HlsVariant[] }
+  | { ok: true; kind: 'master'; variants: HlsVariant[]; subtitles: HlsSubtitleRendition[] }
   | { ok: true; kind: 'media'; media: HlsMedia }
   | { ok: true; kind: 'live'; live: HlsLiveMedia }
   | { ok: false; error: string }
@@ -545,6 +553,8 @@ export function parseHlsPlaylist(text: string, playlistUrl: string): HlsPlaylist
 
 function parseMaster(lines: string[], playlistUrl: string): HlsPlaylist {
   const variants: HlsVariant[] = []
+  const subtitles: HlsSubtitleRendition[] = []
+  const seenSubtitles = new Set<string>()
   let sawIframe = false
   for (let index = 0; index < lines.length; index += 1) {
     const tag = tagOf(lines[index])
@@ -558,6 +568,24 @@ function parseMaster(lines: string[], playlistUrl: string): HlsPlaylist {
     }
     if (tag.name === 'EXT-X-I-FRAME-STREAM-INF') {
       sawIframe = true
+      continue
+    }
+    if (tag.name === 'EXT-X-MEDIA') {
+      const attrs = parseAttributeList(tag.rest)
+      if ((attrs.get('TYPE') ?? '').trim().toUpperCase() !== 'SUBTITLES') continue
+      const uri = attrs.get('URI')
+      // 坏掉的字幕地址不能让视频清单解析失败。点播下载仍然只看清晰度。
+      if (!uri || uri.includes('{$')) continue
+      const url = resolveHttp(playlistUrl, uri)
+      if (!url || seenSubtitles.has(url)) continue
+      seenSubtitles.add(url)
+      const language = attrs.get('LANGUAGE')?.trim()
+      const name = attrs.get('NAME')?.trim() || language || '字幕'
+      const rendition: HlsSubtitleRendition = { url, name }
+      if (language) rendition.language = language
+      const groupId = attrs.get('GROUP-ID')?.trim()
+      if (groupId) rendition.groupId = groupId
+      subtitles.push(rendition)
       continue
     }
     if (tag.name !== 'EXT-X-STREAM-INF') continue
@@ -583,7 +611,7 @@ function parseMaster(lines: string[], playlistUrl: string): HlsPlaylist {
     variants.push(variant)
   }
   if (variants.length === 0) return fail(sawIframe ? HLS_TEXT.iframeOnlyMaster : HLS_TEXT.noVariants)
-  return { ok: true, kind: 'master', variants: sortVariants(variants) }
+  return { ok: true, kind: 'master', variants: sortVariants(variants), subtitles }
 }
 
 function parseMedia(lines: string[], playlistUrl: string): HlsPlaylist {

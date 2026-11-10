@@ -25,6 +25,8 @@ export const MESSAGE_TYPE = {
   HLS_LIVE_START: 'HLS_LIVE_START',
   HLS_LIVE_STOP: 'HLS_LIVE_STOP',
   HLS_LIVE_CANCEL: 'HLS_LIVE_CANCEL',
+  SUBTITLE_INSPECT: 'SUBTITLE_INSPECT',
+  SUBTITLE_DOWNLOAD: 'SUBTITLE_DOWNLOAD',
   DASH_INSPECT: 'DASH_INSPECT',
   DASH_DOWNLOAD: 'DASH_DOWNLOAD',
   DASH_CANCEL: 'DASH_CANCEL',
@@ -113,6 +115,26 @@ export interface HlsLiveStartMessage {
   url: string
   mediaUrl: string
   tabId?: number
+  /**
+   * 为 true 时，把点击时清单里已有的分片也录进去。
+   * 缺省或 false：从直播边缘开始。
+   */
+  includeExisting?: boolean
+}
+
+/** popup → background。读清单里的字幕轨，不开始下载音视频。 */
+export interface SubtitleInspectMessage {
+  type: typeof MESSAGE_TYPE.SUBTITLE_INSPECT
+  url: string
+}
+
+/** popup → background。下载一条字幕。trackId 是 HLS 字幕清单地址，或 DASH Representation id。 */
+export interface SubtitleDownloadMessage {
+  type: typeof MESSAGE_TYPE.SUBTITLE_DOWNLOAD
+  url: string
+  trackId: string
+  format: 'vtt' | 'srt'
+  tabId?: number
 }
 
 /** popup → background。停止轮询并保存已经录到的内容。 */
@@ -197,6 +219,8 @@ export type ExtensionMessage =
   | HlsLiveStartMessage
   | HlsLiveStopMessage
   | HlsLiveCancelMessage
+  | SubtitleInspectMessage
+  | SubtitleDownloadMessage
   | DashInspectMessage
   | DashDownloadMessage
   | DashCancelMessage
@@ -304,6 +328,20 @@ export function isHlsLiveStartMessage(value: unknown): value is HlsLiveStartMess
   if (!isRecord(value) || value.type !== MESSAGE_TYPE.HLS_LIVE_START) return false
   if (!isHttpishUrl(value.url) || !isHttpishUrl(value.mediaUrl)) return false
   if (value.tabId !== undefined && !isTabId(value.tabId)) return false
+  if (value.includeExisting !== undefined && typeof value.includeExisting !== 'boolean') return false
+  return true
+}
+
+export function isSubtitleInspectMessage(value: unknown): value is SubtitleInspectMessage {
+  return isRecord(value) && value.type === MESSAGE_TYPE.SUBTITLE_INSPECT && isHttpishUrl(value.url)
+}
+
+export function isSubtitleDownloadMessage(value: unknown): value is SubtitleDownloadMessage {
+  if (!isRecord(value) || value.type !== MESSAGE_TYPE.SUBTITLE_DOWNLOAD) return false
+  if (!isHttpishUrl(value.url)) return false
+  if (typeof value.trackId !== 'string' || value.trackId.trim() === '') return false
+  if (value.format !== 'vtt' && value.format !== 'srt') return false
+  if (value.tabId !== undefined && !isTabId(value.tabId)) return false
   return true
 }
 
@@ -373,6 +411,8 @@ export function isExtensionMessage(value: unknown): value is ExtensionMessage {
     isHlsLiveStartMessage(value) ||
     isHlsLiveStopMessage(value) ||
     isHlsLiveCancelMessage(value) ||
+    isSubtitleInspectMessage(value) ||
+    isSubtitleDownloadMessage(value) ||
     isDashInspectMessage(value) ||
     isDashDownloadMessage(value) ||
     isDashCancelMessage(value) ||

@@ -186,6 +186,7 @@ async function dispatchHls(job: HlsQueueJob): Promise<void> {
   }
   if (job.title) message.title = job.title
   if (job.index !== undefined) message.index = job.index
+  if (job.live === true && job.includeExisting === true) message.includeExisting = true
   const started = await sendOffscreen(message)
   if (started === undefined) {
     await failDispatch(job, HLS_TEXT.offscreen)
@@ -358,6 +359,7 @@ export function enqueueHlsJob(input: {
   key: string
   mediaUrl: string
   live?: boolean
+  includeExisting?: boolean
   tabId?: number
   title?: string
   index?: number
@@ -370,6 +372,7 @@ export function enqueueHlsJob(input: {
     enqueuedAt: Date.now(),
   }
   if (input.live === true) job.live = true
+  if (input.live === true && input.includeExisting === true) job.includeExisting = true
   if (input.tabId !== undefined) job.tabId = input.tabId
   if (input.title) job.title = input.title
   if (input.index !== undefined) job.index = input.index

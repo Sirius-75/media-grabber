@@ -2,7 +2,7 @@
  * DASH 清单解析和下载计划。不访问 chrome，也不发请求。
  *
  * 只做静态点播、没有 ContentProtection、用 SegmentTemplate 或 SegmentList 的 mp4。
- * 直播、DRM、多个 Period、SegmentBase、字幕合并都不做。
+ * 直播、DRM、多个 Period、SegmentBase 都不做。字幕轨单独列出来，不并进音视频文件。
  * 相对地址按标准 URL 规则拼到清单或 BaseURL 上，不把清单 query 里的 token 抄到分片上。
  *
  * 视频和音频常常是两个 AdaptationSet。计划里仍是两路地址。
@@ -12,6 +12,7 @@
 import { assessHlsSize, isHttpUrl, joinWarnings, sortVariants, variantLabel, type HlsVariant } from './hls'
 import type { HlsVariantChoice } from './hls-job'
 import { DASH_TEXT } from './dash-text'
+import { SUBTITLE_TEXT } from './webvtt'
 
 /** 展开时间线时的上限。再多就拒绝，避免先造出几万个地址。 */
 const MAX_SEGMENTS = 20_000
@@ -35,10 +36,24 @@ export interface DashTrack {
   segments: DashSegment[]
 }
 
+export interface DashSubtitleTrack {
+  id: string
+  label: string
+  language?: string
+  /** vtt / ttml 可以下载并转成 .vtt。unsupported 只展示中文说明。 */
+  format: 'vtt' | 'ttml' | 'unsupported'
+  /** 单文件只有一项。分片按时间顺序。下载不了时为空。 */
+  urls: string[]
+  /** 不能下载时的中文说明。 */
+  note?: string
+}
+
 export interface DashManifest {
   ok: true
   videos: DashTrack[]
   audios: DashTrack[]
+  /** 文本字幕轨。不参与音视频下载计划。 */
+  subtitles: DashSubtitleTrack[]
   /** 清单上的时长，秒。没有就是 0，体积估算会跳过。 */
   durationSeconds: number
 }
@@ -340,6 +355,148 @@ function buildFromList(list: Element, baseUrl: string): BuiltSegments | { error:
   return { initUrl, segments }
 }
 
+function isTextTrack(mime: string, contentType: string | undefined): boolean {
+  const content = contentType?.toLowerCase() ?? ''
+  if (content === 'text') return true
+  if (mime.startsWith('text/')) return true
+  if (mime.includes('ttml') || mime.includes('vtt') || mime.includes('imsc')) return true
+  return false
+}
+
+function subtitleFormat(mime: string, codecs: string | undefined): DashSubtitleTrack['format'] {
+  const type = mime.toLowerCase()
+  const codec = (codecs ?? '').toLowerCase()
+  if (codec.includes('stpp')) return 'unsupported'
+  if (type === 'application/mp4' || type === 'video/mp4' || codec.includes('wvtt')) return 'unsupported'
+  if (type.includes('vtt')) return 'vtt'
+  if (type.includes('ttml') || type.includes('imsc') || type === 'application/xml' || type === 'text/xml') return 'ttml'
+  if (type.startsWith('text/')) return 'vtt'
+  return 'unsupported'
+}
+
+function unsupportedNote(codecs: string | undefined, mime: string): string {
+  const codec = (codecs ?? '').toLowerCase()
+  const type = mime.toLowerCase()
+  if (codec.includes('stpp') || type.includes('ttml') && type.includes('mp4')) return SUBTITLE_TEXT.unsupportedStpp
+  if (codec.includes('stpp')) return SUBTITLE_TEXT.unsupportedStpp
+  if (codec.includes('wvtt') || type === 'application/mp4') return SUBTITLE_TEXT.unsupportedWvtt
+  return SUBTITLE_TEXT.unsupported
+}
+
+function subtitleLabel(language: string | undefined, name: string | undefined, id: string): string {
+  const lang = language?.trim()
+  const title = name?.trim()
+  if (title && lang && title.toLowerCase() !== lang.toLowerCase()) return `${title}（${lang}）`
+  return title || lang || id
+}
+
+function singleFileUrl(manifestUrl: string, baseUrl: string): string | undefined {
+  if (baseUrl === manifestUrl) return undefined
+  try {
+    const path = new URL(baseUrl).pathname
+    if (path.endsWith('/')) return undefined
+    return baseUrl
+  } catch {
+    return undefined
+  }
+}
+
+/** 字幕不要求初始化段。坏模板只记在这一条上，不让整份音视频清单失败。 */
+function subtitleUrls(
+  period: Element,
+  adaptation: Element,
+  representation: Element,
+  representationId: string,
+  bandwidth: number,
+  baseUrl: string,
+  manifestUrl: string,
+  periodSeconds: number,
+): { urls: string[] } | { note: string } {
+  const nodes = [representation, adaptation, period]
+  let mode: 'template' | 'list' | 'base' | undefined
+  for (const node of nodes) {
+    if (firstChild(node, 'SegmentTemplate')) {
+      mode = 'template'
+      break
+    }
+    if (firstChild(node, 'SegmentList')) {
+      mode = 'list'
+      break
+    }
+    if (firstChild(node, 'SegmentBase')) {
+      mode = 'base'
+      break
+    }
+  }
+  if (mode === 'base') return { note: SUBTITLE_TEXT.segmentBase }
+  if (mode === 'list') {
+    const list =
+      firstChild(representation, 'SegmentList') ??
+      firstChild(adaptation, 'SegmentList') ??
+      firstChild(period, 'SegmentList')
+    if (!list) return { note: DASH_TEXT.unsupportedTemplate }
+    const urls: string[] = []
+    for (const node of children(list, 'SegmentURL')) {
+      const media = attr(node, 'media')
+      if (!media) return { note: DASH_TEXT.unsupportedTemplate }
+      const url = resolveAgainst(baseUrl, media)
+      if (!url) return { note: DASH_TEXT.badSegmentUrl }
+      urls.push(url)
+      if (urls.length > MAX_SEGMENTS) return { note: DASH_TEXT.tooMany }
+    }
+    if (urls.length === 0) return { note: SUBTITLE_TEXT.noUrl }
+    return { urls }
+  }
+  if (mode === 'template') {
+    let template: TemplateAttrs | undefined
+    for (const node of [period, adaptation, representation]) {
+      const merged = mergeTemplate(template, readTemplate(firstChild(node, 'SegmentTemplate')))
+      if (merged && 'error' in merged) return { note: merged.error }
+      template = merged
+    }
+    if (!template?.media) return { note: DASH_TEXT.unsupportedTemplate }
+    const mediaTemplate = template.media
+    const timescale = template.timescale && template.timescale > 0 ? template.timescale : 1
+    const startNumber = template.startNumber ?? 1
+    let points: Array<{ time: number; number: number }>
+    if (template.timeline) {
+      const expanded = expandTimeline(template.timeline, timescale, periodSeconds)
+      if ('error' in expanded) return { note: expanded.error }
+      points = expanded
+    } else if (template.duration && template.duration > 0 && periodSeconds > 0) {
+      const count = Math.ceil(periodSeconds / (template.duration / timescale) - 1e-8)
+      if (!Number.isFinite(count) || count < 1) return { note: DASH_TEXT.unknownCount }
+      if (count > MAX_SEGMENTS) return { note: DASH_TEXT.tooMany }
+      const step = template.duration
+      points = Array.from({ length: count }, (_, number) => ({ time: number * step, number }))
+    } else if (template.endNumber !== undefined && template.endNumber >= startNumber) {
+      const count = template.endNumber - startNumber + 1
+      if (count > MAX_SEGMENTS) return { note: DASH_TEXT.tooMany }
+      points = Array.from({ length: count }, (_, number) => ({ time: number, number }))
+    } else {
+      return { note: DASH_TEXT.unknownCount }
+    }
+    const urls: string[] = []
+    for (const point of points) {
+      const filled = fillDashTemplate(mediaTemplate, {
+        RepresentationID: representationId,
+        Bandwidth: bandwidth,
+        Number: startNumber + point.number,
+        Time: point.time,
+      })
+      if (!filled) return { note: DASH_TEXT.unsupportedTemplate }
+      const url = resolveAgainst(baseUrl, filled)
+      if (!url) return { note: DASH_TEXT.badSegmentUrl }
+      urls.push(url)
+    }
+    if (urls.length === 0) return { note: SUBTITLE_TEXT.noUrl }
+    return { urls }
+  }
+  const single = singleFileUrl(manifestUrl, baseUrl)
+  if (!single) return { note: SUBTITLE_TEXT.noUrl }
+  return { urls: [single] }
+}
+
 function trackKind(mime: string, contentType: string | undefined): 'video' | 'audio' | 'skip' {
   const content = contentType?.toLowerCase() ?? ''
   // contentType 是 video / audio / text，不是 MIME。字幕和图片直接跳过。
@@ -476,6 +633,7 @@ export function parseMpd(xml: string, manifestUrl: string): DashParseResult {
 
   const videos: DashTrack[] = []
   const audios: DashTrack[] = []
+  const subtitles: DashSubtitleTrack[] = []
   let sawSegmentBase = false
 
   for (const adaptation of children(period, 'AdaptationSet')) {
@@ -483,12 +641,51 @@ export function parseMpd(xml: string, manifestUrl: string): DashParseResult {
     const adaptationType = attr(adaptation, 'contentType')
     const adaptationMain = isMain(adaptation, false)
     const adaptationBase = textOf(firstChild(adaptation, 'BaseURL'))
+    const adaptationLang = attr(adaptation, 'lang')
+    const adaptationLabel = textOf(firstChild(adaptation, 'Label'))
+    const adaptationCodecs = attr(adaptation, 'codecs')
 
     for (const representation of children(adaptation, 'Representation')) {
       const id = attr(representation, 'id')
       if (!id) return fail(DASH_TEXT.missingId)
       const mime = (attr(representation, 'mimeType') ?? adaptationMime ?? '').toLowerCase()
       const contentType = attr(representation, 'contentType') ?? adaptationType
+      if (isTextTrack(mime, contentType)) {
+        const codecs = attr(representation, 'codecs') ?? adaptationCodecs
+        const language = attr(representation, 'lang') ?? adaptationLang
+        const format = subtitleFormat(mime, codecs)
+        const label = subtitleLabel(language, textOf(firstChild(representation, 'Label')) ?? adaptationLabel, id)
+        const track: DashSubtitleTrack = { id, label, format, urls: [] }
+        if (language) track.language = language
+        if (format === 'unsupported') {
+          track.note = unsupportedNote(codecs, mime)
+        } else {
+          const bandwidth = Math.max(
+            0,
+            Math.round(numberAttr(representation, 'bandwidth') ?? numberAttr(adaptation, 'bandwidth') ?? 0),
+          )
+          const baseUrl = chainBase(manifestUrl, [
+            mpdBase,
+            periodBase,
+            adaptationBase,
+            textOf(firstChild(representation, 'BaseURL')),
+          ])
+          const built = subtitleUrls(
+            period,
+            adaptation,
+            representation,
+            id,
+            bandwidth,
+            baseUrl,
+            manifestUrl,
+            durationSeconds,
+          )
+          if ('note' in built) track.note = built.note
+          else track.urls = built.urls
+        }
+        subtitles.push(track)
+        continue
+      }
       const kind = trackKind(mime, contentType)
       if (kind === 'skip') continue
 
@@ -539,6 +736,7 @@ export function parseMpd(xml: string, manifestUrl: string): DashParseResult {
     ok: true,
     videos: sortedTracks(videos),
     audios: sortedTracks(audios),
+    subtitles,
     durationSeconds,
   }
 }

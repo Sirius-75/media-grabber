@@ -4,6 +4,7 @@ import {
   LIVE_POLL_MAX_MS,
   LIVE_POLL_MIN_MS,
   LIVE_STALL_MS,
+  firstLiveSequence,
   formatLiveElapsed,
   liveRecordingText,
 } from '../src/shared/hls-live'
@@ -42,6 +43,11 @@ function makeHarness(input: {
   cancelSignal?: AbortSignal
   maxBytes?: number
   maxManifestFailures?: number
+  /**
+   * 这些用例测的是去重、停止和失败，需要把第一份窗口里的分片都录下来。
+   * 产品默认是从直播边缘开始；要测边缘时显式传 false。
+   */
+  includeExistingSegments?: boolean
   onPlaylist?: (call: number) => void
   onSegment?: (url: string, call: number) => void
 }): Harness {
@@ -55,6 +61,7 @@ function makeHarness(input: {
     cancelSignal,
     maxBytes: input.maxBytes,
     maxManifestFailures: input.maxManifestFailures,
+    includeExistingSegments: input.includeExistingSegments ?? true,
     now: () => clock.now,
     wait: async (ms, signal) => {
       if (signal.aborted) return
@@ -279,6 +286,114 @@ describe('直播录制轮询', () => {
     expect(Array.from(result.parts[0] ?? [])).toEqual(Array.from(plainA))
     expect(Array.from(result.parts[1] ?? [])).toEqual(Array.from(plainB))
     expect(harness.segmentCalls.filter((url) => url.endsWith('key.bin'))).toHaveLength(1)
+  })
+})
+
+describe('直播从点击时的边缘开始', () => {
+  it('默认只收录窗口里序号最大的分片，之后的新分片继续追加', async () => {
+    const harness = makeHarness({
+      includeExistingSegments: false,
+      playlists: [
+        playlist(10, ['a.ts', 'b.ts', 'c.ts']),
+        playlist(12, ['c.ts', 'd.ts']),
+        playlist(13, ['d.ts', 'e.ts'], { end: true }),
+      ],
+      segments: {
+        'https://cdn.example/live/a.ts': bytesOf('a'),
+        'https://cdn.example/live/b.ts': bytesOf('b'),
+        'https://cdn.example/live/c.ts': bytesOf('c'),
+        'https://cdn.example/live/d.ts': bytesOf('d'),
+        'https://cdn.example/live/e.ts': bytesOf('e'),
+      },
+    })
+    const result = await harness.recorder.run()
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(textOf(result.parts)).toBe('cde')
+    expect(result.segmentCount).toBe(3)
+    expect(result.durationSeconds).toBe(6)
+    expect(harness.segmentCalls).toEqual([
+      'https://cdn.example/live/c.ts',
+      'https://cdn.example/live/d.ts',
+      'https://cdn.example/live/e.ts',
+    ])
+  })
+
+  it('第一份清单还没有分片时，下一份再按边缘对齐', async () => {
+    const harness = makeHarness({
+      includeExistingSegments: false,
+      playlists: [playlist(1, []), playlist(4, ['a.ts', 'b.ts', 'c.ts'], { end: true })],
+      segments: {
+        'https://cdn.example/live/a.ts': bytesOf('a'),
+        'https://cdn.example/live/b.ts': bytesOf('b'),
+        'https://cdn.example/live/c.ts': bytesOf('c'),
+      },
+    })
+    const result = await harness.recorder.run()
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(textOf(result.parts)).toBe('c')
+    expect(harness.segmentCalls).toEqual(['https://cdn.example/live/c.ts'])
+  })
+
+  it('fMP4 仍然先取初始化段，媒体分片只留边缘那一片', async () => {
+    const init = [
+      '#EXTM3U',
+      '#EXT-X-TARGETDURATION:2',
+      '#EXT-X-MEDIA-SEQUENCE:8',
+      '#EXT-X-MAP:URI="init.mp4"',
+      '#EXTINF:2,',
+      'a.m4s',
+      '#EXTINF:2,',
+      'b.m4s',
+      '#EXTINF:2,',
+      'c.m4s',
+      '#EXT-X-ENDLIST',
+    ].join('\n')
+    // 第一份是直播，第二份才结束。边缘对齐发生在第一份。
+    const live = init.replace('#EXT-X-ENDLIST', '')
+    const harness = makeHarness({
+      includeExistingSegments: false,
+      playlists: [live, init],
+      segments: {
+        'https://cdn.example/live/init.mp4': bytesOf('INIT'),
+        'https://cdn.example/live/a.m4s': bytesOf('a'),
+        'https://cdn.example/live/b.m4s': bytesOf('b'),
+        'https://cdn.example/live/c.m4s': bytesOf('c'),
+      },
+    })
+    const result = await harness.recorder.run()
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.container).toBe('mp4')
+    expect(textOf(result.parts)).toBe('INITc')
+    expect(harness.segmentCalls).toEqual([
+      'https://cdn.example/live/init.mp4',
+      'https://cdn.example/live/c.m4s',
+    ])
+  })
+
+  it('开关打开时，窗口里已有的分片都写入', async () => {
+    const harness = makeHarness({
+      includeExistingSegments: true,
+      playlists: [playlist(3, ['a.ts', 'b.ts']), playlist(3, ['a.ts', 'b.ts'], { end: true })],
+      segments: {
+        'https://cdn.example/live/a.ts': bytesOf('a'),
+        'https://cdn.example/live/b.ts': bytesOf('b'),
+      },
+    })
+    const result = await harness.recorder.run()
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(textOf(result.parts)).toBe('ab')
+  })
+
+  it('firstLiveSequence 在边缘和整窗之间切换', () => {
+    const segments = [{ sequence: 4 }, { sequence: 5 }, { sequence: undefined }, { sequence: 9 }]
+    expect(firstLiveSequence(segments, 'edge')).toBe(9)
+    expect(firstLiveSequence(segments, 'all')).toBe(4)
+    expect(firstLiveSequence([], 'edge')).toBeUndefined()
+    expect(firstLiveSequence([{ sequence: undefined }], 'all')).toBeUndefined()
   })
 })
 

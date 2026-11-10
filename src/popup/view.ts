@@ -16,6 +16,7 @@ import { queuePosition, queuedStatusText, type DownloadQueueState } from '../sha
 import { DASH_NO_AUDIO_HINT, DASH_NOTE } from '../shared/dash-text'
 import { largeMergeWarning } from '../shared/size-warning'
 import type { HlsJobMap, HlsJobPhase, HlsJobRecord } from '../shared/hls-job'
+import type { SubtitleTrackView } from '../shared/subtitles'
 import type { BilibiliRole, MediaItem, MediaKind } from '../shared/types'
 
 /** 单行里大约能放下的字符数。更长的地址用省略号截断，悬停仍看全文。 */
@@ -270,6 +271,14 @@ export function hlsJobForItem(
   return jobs[key]
 }
 
+/** 一条清单上已经读到的字幕。error 是整份清单的中文原因，例如 DRM。 */
+export interface ShownSubtitles {
+  tracks: readonly SubtitleTrackView[]
+  error?: string
+  pendingId?: string
+  message?: string
+}
+
 export interface ListActions {
   onCopy: (url: string, button: HTMLButtonElement) => void
   onDownload: (url: string, button: HTMLButtonElement) => void
@@ -291,6 +300,7 @@ export interface ListActions {
   onBilibiliWithAudio?: (url: string, button: HTMLButtonElement) => void
   onBilibiliAudio?: (url: string, button: HTMLButtonElement) => void
   onBilibiliCancel?: (url: string, button: HTMLButtonElement) => void
+  onSubtitleDownload?: (url: string, trackId: string, format: 'vtt' | 'srt', button: HTMLButtonElement) => void
 }
 
 /** 把当前列表画进 ul。调用方保留 ul 上的点击监听，这里只换子节点。 */
@@ -303,6 +313,7 @@ export function renderList(
   dashJobs?: HlsJobMap,
   bilibiliJobs?: HlsJobMap,
   queue?: DownloadQueueState,
+  subtitles?: ReadonlyMap<string, ShownSubtitles>,
 ): void {
   const pairAudio = items.some((item) => item.bilibili?.role === 'audio')
   const ordered = orderForPopup(items)
@@ -317,6 +328,7 @@ export function renderList(
       hlsJobForItem(item, bilibiliJobs),
       pairAudio,
       queuedPositionForItem(item, queue),
+      subtitles?.get(item.url),
     ),
   )
   list.replaceChildren(...rows)
@@ -370,10 +382,17 @@ export function bindListActions(
     if (button.dataset.action === 'bilibili-with-audio') actions.onBilibiliWithAudio?.(item.url, button)
     if (button.dataset.action === 'bilibili-audio') actions.onBilibiliAudio?.(item.url, button)
     if (button.dataset.action === 'bilibili-cancel') actions.onBilibiliCancel?.(item.url, button)
+    if (button.dataset.action === 'subtitle-download') {
+      const trackId = button.dataset.track ?? ''
+      const select = button.parentElement?.querySelector('select')
+      const format = select instanceof HTMLSelectElement && select.value === 'srt' ? 'srt' : 'vtt'
+      actions.onSubtitleDownload?.(item.url, trackId, format, button)
+    }
   })
   list.addEventListener('change', (event) => {
     const select = event.target
     if (!(select instanceof HTMLSelectElement) || !list.contains(select)) return
+    if (select.classList.contains('subtitle-format')) return
     const row = select.closest('.item')
     if (!(row instanceof HTMLElement)) return
     const index = Number(row.dataset.index)
@@ -415,6 +434,7 @@ function renderItem(
   bilibiliJob: HlsJobRecord | undefined,
   pairAudio: boolean,
   queuedPosition: number | undefined,
+  subtitles: ShownSubtitles | undefined,
 ): HTMLLIElement {
   const row = document.createElement('li')
   row.className = 'item'
@@ -606,6 +626,7 @@ function renderItem(
   }
 
   row.append(actions)
+  appendSubtitles(row, subtitles)
   if (hls) {
     const message =
       hls.phase === 'queued' ? (queuedPosition === undefined ? '排队中' : queuedStatusText(queuedPosition)) : hls.message
@@ -677,6 +698,62 @@ function appendDashButtons(actions: HTMLElement, dashJob?: HlsJobRecord): void {
   if (dashJob?.hasAudio !== false) {
     actions.append(bilibiliActionButton('dash-audio', '下载音频'))
   }
+}
+
+function appendSubtitles(row: HTMLElement, shown: ShownSubtitles | undefined): void {
+  if (!shown) return
+  if (shown.error) {
+    const note = document.createElement('p')
+    note.className = 'note'
+    note.textContent = shown.error
+    row.append(note)
+    return
+  }
+  if (shown.tracks.length === 0) return
+  const list = document.createElement('div')
+  list.className = 'subtitles'
+  for (const track of shown.tracks) {
+    const line = document.createElement('div')
+    line.className = 'subtitle'
+    const label = document.createElement('span')
+    label.className = 'subtitle-label'
+    label.textContent = track.label
+    line.append(label)
+    if (track.note || track.format === 'unsupported') {
+      const note = document.createElement('span')
+      note.className = 'note'
+      note.textContent = track.note || '这种字幕格式暂不支持'
+      line.append(note)
+    } else {
+      const select = document.createElement('select')
+      select.className = 'subtitle-format'
+      select.setAttribute('aria-label', '字幕格式')
+      for (const [value, text] of [
+        ['vtt', '.vtt'],
+        ['srt', '.srt'],
+      ] as const) {
+        const option = document.createElement('option')
+        option.value = value
+        option.textContent = text
+        select.append(option)
+      }
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.dataset.action = 'subtitle-download'
+      button.dataset.track = track.id
+      button.disabled = shown.pendingId === track.id
+      button.textContent = shown.pendingId === track.id ? '正在下载字幕…' : '下载字幕'
+      line.append(select, button)
+    }
+    list.append(line)
+  }
+  if (shown.message) {
+    const status = document.createElement('p')
+    status.className = 'note'
+    status.textContent = shown.message
+    list.append(status)
+  }
+  row.append(list)
 }
 
 function bilibiliActionButton(action: string, text: string): HTMLButtonElement {

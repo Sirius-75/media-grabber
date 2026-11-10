@@ -67,6 +67,34 @@ describe('主清单', () => {
     expect(parsed.ok).toBe(true)
   })
 
+  it('EXT-X-MEDIA 字幕不影响清晰度，坏掉的字幕地址也不会让清单失败', () => {
+    const withSubs = [
+      text,
+      '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="Audio",URI="audio.m3u8"',
+      '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="中文",LANGUAGE="zh",URI="subs/zh.m3u8"',
+      '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",DEFAULT=YES,URI="https://cdn.example/en.vtt"',
+      '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="坏",URI="ftp://cdn.example/bad.vtt"',
+      '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="重复",LANGUAGE="zh",URI="subs/zh.m3u8"',
+    ].join('\n')
+    const parsed = parseHlsPlaylist(withSubs, MASTER)
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok || parsed.kind !== 'master') return
+    expect(parsed.variants).toHaveLength(3)
+    expect(parsed.subtitles).toEqual([
+      {
+        url: 'https://cdn.example/hls/subs/zh.m3u8',
+        name: '中文',
+        language: 'zh',
+        groupId: 'subs',
+      },
+      {
+        url: 'https://cdn.example/en.vtt',
+        name: 'English',
+        groupId: 'subs',
+      },
+    ])
+  })
+
   it('只有关键帧预览时拒绝', () => {
     const onlyIframe = ['#EXTM3U', '#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=100,URI="i.m3u8"'].join('\n')
     expect(parseHlsPlaylist(onlyIframe, MASTER)).toEqual({ ok: false, error: HLS_TEXT.iframeOnlyMaster })
