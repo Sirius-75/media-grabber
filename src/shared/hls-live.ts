@@ -3,7 +3,11 @@
  *
  * 轮询用 setTimeout 链（每次只安排下一次），不用 setInterval。
  * 按 EXT-X-MEDIA-SEQUENCE 去重：滚动窗口里重复出现的分片不会再下一次。
- * 默认从直播边缘开始：第一份窗口里只收录序号最大的分片，更早的跳过。
+ * 默认从直播边缘开始：第一份非空窗口里只收录序号最大的分片，更早的跳过。
+ * 如果点击后第一次轮询还是空窗，随后第一份出现的分片都算点击之后的，整窗收录。
+ * 序号大幅回退时，要连续两轮都是低序号，或这一轮带 EXT-X-DISCONTINUITY，才当成清单重置。
+ * 连续两轮里如果多数地址以前见过，仍视为过期清单，不写入。
+ * 确认重置后收录这一整窗（不是只留边缘），并清空去重，允许复用文件名。
  * includeExistingSegments 为 true 时改回旧行为，窗口里已有的分片都写入。
  * 支持点播已有的标准 AES-128：每一片下载后立刻解密，内存里只留明文。
  * 已录字节达到上限、清单出现 EXT-X-ENDLIST、长时间没有新分片、清单连续失败时自动停止。
@@ -100,6 +104,9 @@ export interface HlsLiveOptions {
  * all：窗口里已有的分片都收录。
  * 没有带序号的分片时返回 undefined。
  */
+/** 新窗口的最大序号比已收录序号还小这么多，才当成 media sequence 重置，避免正常重叠被误判。 */
+export const LIVE_SEQUENCE_RESET_MARGIN = 2
+
 export function firstLiveSequence(
   segments: readonly { sequence?: number }[],
   mode: 'edge' | 'all',
@@ -206,6 +213,16 @@ export class HlsLiveRecorder {
   private started = false
   /** 已经根据第一份非空窗口决定过起点。之后只按序号去重。 */
   private anchored = false
+  /** 锚定之前见过空窗。空窗之后的第一份分片都出现在点击之后，整窗收录。 */
+  private sawEmptyWindow = false
+  /** 已经下过的分片地址。确认序号重置后清空，因为编码器可能复用文件名。 */
+  private readonly fetchedUrls = new Set<string>()
+  /** 窗口里出现过的地址，含没下载的。用来认出过期清单，不把旧分片再接上去。 */
+  private readonly seenUrls = new Set<string>()
+  /** 上一轮已经是偏低的序号窗口。再来一轮才确认重置。 */
+  private sawLowWindow = false
+  /** 进入低序号之前见过的地址。确认时用这份，避免把上一轮低窗口自己算成“见过”。 */
+  private seenBeforeLow: Set<string> | undefined
   private readonly includeExistingSegments: boolean
 
   constructor(options: HlsLiveOptions) {
@@ -348,12 +365,25 @@ export class HlsLiveRecorder {
       }
     }
 
+    const reset = this.noteSequenceReset(media)
+    const seenBefore = new Set(this.seenUrls)
+    if (reset === 'confirmed') {
+      this.fetchedUrls.clear()
+      this.seenUrls.clear()
+    }
     this.anchor(media)
     for (const segment of media.segments) {
       if (this.cancelSignal.aborted) return {}
       const sequence = segment.sequence
       if (sequence === undefined) continue
+      this.seenUrls.add(segment.url)
       if (this.nextSequence !== undefined && sequence < this.nextSequence) continue
+      // 偏低但还没确认的窗口：以前见过的地址直接跳过，也不把序号往回拨。
+      if (reset === 'hold' && seenBefore.has(segment.url)) continue
+      if (this.fetchedUrls.has(segment.url)) {
+        this.nextSequence = sequence + 1
+        continue
+      }
 
       const fetched = await this.fetchWithRetries(segment.url, false)
       if (!fetched.ok) {
@@ -369,9 +399,11 @@ export class HlsLiveRecorder {
       }
       if (!this.pushPart(bytes)) {
         // 达到上限的这一片不再加入。已经录到的内容仍然保存。
+        this.fetchedUrls.add(segment.url)
         this.nextSequence = sequence + 1
         return { reason: 'size-limit' }
       }
+      this.fetchedUrls.add(segment.url)
       this.nextSequence = sequence + 1
       this.segmentCount += 1
       if (segment.duration !== undefined && Number.isFinite(segment.duration) && segment.duration > 0) {
@@ -387,14 +419,70 @@ export class HlsLiveRecorder {
   /**
    * 只在第一次看到带序号的分片时决定起点。
    * 默认对齐直播边缘：跳过窗口里更早的分片，保留序号最大的一片。
+   * 点击后的第一份清单如果是空的，或序号刚刚确认重置，这些分片整段收录。
    * 初始化段不在这里跳过，fMP4 仍然需要它才能播放，保存时照旧做 tfdt 归零。
    */
   private anchor(media: HlsMedia): void {
     if (this.anchored || this.nextSequence !== undefined) return
-    const start = firstLiveSequence(media.segments, this.includeExistingSegments ? 'all' : 'edge')
-    if (start === undefined) return
+    const mode = this.includeExistingSegments || this.sawEmptyWindow ? 'all' : 'edge'
+    const start = firstLiveSequence(media.segments, mode)
+    if (start === undefined) {
+      this.sawEmptyWindow = true
+      return
+    }
     this.anchored = true
-    if (!this.includeExistingSegments) this.nextSequence = start
+    if (mode === 'edge') this.nextSequence = start
+  }
+
+  /**
+   * 服务器把 media sequence 从高序号打回接近 0 时，旧的 nextSequence 会把新分片全部跳过。
+   * 只出现一次的偏低窗口当成 CDN 返回了过期清单，不重新锚定。
+   * 连续两轮都偏低，或这一轮带 EXT-X-DISCONTINUITY，才确认重置。
+   * 没有不连续标记时，低窗口里多数地址必须是没见过的，否则仍是过期清单。
+   * 确认后把 sawEmptyWindow 打开，这一整窗都收录。
+   */
+  private noteSequenceReset(media: HlsMedia): 'confirmed' | 'hold' | 'none' {
+    if (this.nextSequence === undefined) return 'none'
+    let highest: number | undefined
+    let count = 0
+    let discontinuity = false
+    for (const segment of media.segments) {
+      if (segment.discontinuity) discontinuity = true
+      if (segment.sequence === undefined) continue
+      count += 1
+      if (highest === undefined || segment.sequence > highest) highest = segment.sequence
+    }
+    const low = highest !== undefined && highest + count + LIVE_SEQUENCE_RESET_MARGIN < this.nextSequence
+    if (!low) {
+      this.sawLowWindow = false
+      this.seenBeforeLow = undefined
+      return 'none'
+    }
+    if (!discontinuity && !this.sawLowWindow) {
+      this.sawLowWindow = true
+      this.seenBeforeLow = new Set(this.seenUrls)
+      return 'hold'
+    }
+    if (!discontinuity && this.mostlySeen(this.seenBeforeLow ?? this.seenUrls, media)) return 'hold'
+    this.sawLowWindow = false
+    this.seenBeforeLow = undefined
+    this.nextSequence = undefined
+    this.anchored = false
+    this.sawEmptyWindow = true
+    return 'confirmed'
+  }
+
+  /** 低窗口里、在进入这段低序号之前就见过的地址占一半或更多时，不当成新的时间线。 */
+  private mostlySeen(baseline: ReadonlySet<string>, media: HlsMedia): boolean {
+    let count = 0
+    let seen = 0
+    for (const segment of media.segments) {
+      if (segment.sequence === undefined) continue
+      count += 1
+      if (baseline.has(segment.url)) seen += 1
+    }
+    if (count === 0) return true
+    return seen * 2 >= count
   }
 
   private pushPart(bytes: Uint8Array): boolean {

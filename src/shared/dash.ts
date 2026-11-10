@@ -283,15 +283,16 @@ function expandTimeline(
   return points
 }
 
-function buildFromTemplate(
+/** SegmentTemplate 展开成媒体地址。音视频和字幕共用，字幕不要求初始化段。 */
+function urlsFromTemplate(
   template: TemplateAttrs,
   representationId: string,
   bandwidth: number,
   baseUrl: string,
   periodSeconds: number,
-): BuiltSegments | { error: string } {
+): { urls: string[] } | { error: string } {
   if (!template.media) return { error: DASH_TEXT.unsupportedTemplate }
-  if (!template.initialization) return { error: DASH_TEXT.noInit }
+  const mediaTemplate = template.media
   const timescale = template.timescale && template.timescale > 0 ? template.timescale : 1
   const startNumber = template.startNumber ?? 1
   let points: Array<{ time: number; number: number }>
@@ -303,7 +304,8 @@ function buildFromTemplate(
     const count = Math.ceil(periodSeconds / (template.duration / timescale) - 1e-8)
     if (!Number.isFinite(count) || count < 1) return { error: DASH_TEXT.unknownCount }
     if (count > MAX_SEGMENTS) return { error: DASH_TEXT.tooMany }
-    points = Array.from({ length: count }, (_, number) => ({ time: number * template.duration!, number }))
+    const step = template.duration
+    points = Array.from({ length: count }, (_, number) => ({ time: number * step, number }))
   } else if (template.endNumber !== undefined && template.endNumber >= startNumber) {
     const count = template.endNumber - startNumber + 1
     if (count > MAX_SEGMENTS) return { error: DASH_TEXT.tooMany }
@@ -312,17 +314,9 @@ function buildFromTemplate(
     return { error: DASH_TEXT.unknownCount }
   }
 
-  const initFilled = fillDashTemplate(template.initialization, {
-    RepresentationID: representationId,
-    Bandwidth: bandwidth,
-  })
-  if (!initFilled) return { error: DASH_TEXT.unsupportedTemplate }
-  const initUrl = resolveAgainst(baseUrl, initFilled)
-  if (!initUrl) return { error: DASH_TEXT.badSegmentUrl }
-
-  const segments: DashSegment[] = []
+  const urls: string[] = []
   for (const point of points) {
-    const filled = fillDashTemplate(template.media, {
+    const filled = fillDashTemplate(mediaTemplate, {
       RepresentationID: representationId,
       Bandwidth: bandwidth,
       Number: startNumber + point.number,
@@ -331,9 +325,31 @@ function buildFromTemplate(
     if (!filled) return { error: DASH_TEXT.unsupportedTemplate }
     const url = resolveAgainst(baseUrl, filled)
     if (!url) return { error: DASH_TEXT.badSegmentUrl }
-    segments.push({ url })
+    urls.push(url)
   }
-  return { initUrl, segments }
+  return { urls }
+}
+
+function buildFromTemplate(
+  template: TemplateAttrs,
+  representationId: string,
+  bandwidth: number,
+  baseUrl: string,
+  periodSeconds: number,
+): BuiltSegments | { error: string } {
+  if (!template.media) return { error: DASH_TEXT.unsupportedTemplate }
+  if (!template.initialization) return { error: DASH_TEXT.noInit }
+  const listed = urlsFromTemplate(template, representationId, bandwidth, baseUrl, periodSeconds)
+  if ('error' in listed) return listed
+
+  const initFilled = fillDashTemplate(template.initialization, {
+    RepresentationID: representationId,
+    Bandwidth: bandwidth,
+  })
+  if (!initFilled) return { error: DASH_TEXT.unsupportedTemplate }
+  const initUrl = resolveAgainst(baseUrl, initFilled)
+  if (!initUrl) return { error: DASH_TEXT.badSegmentUrl }
+  return { initUrl, segments: listed.urls.map((url) => ({ url })) }
 }
 
 function buildFromList(list: Element, baseUrl: string): BuiltSegments | { error: string } {
@@ -355,11 +371,13 @@ function buildFromList(list: Element, baseUrl: string): BuiltSegments | { error:
   return { initUrl, segments }
 }
 
-function isTextTrack(mime: string, contentType: string | undefined): boolean {
+function isTextTrack(mime: string, contentType: string | undefined, codecs: string | undefined): boolean {
   const content = contentType?.toLowerCase() ?? ''
   if (content === 'text') return true
   if (mime.startsWith('text/')) return true
   if (mime.includes('ttml') || mime.includes('vtt') || mime.includes('imsc')) return true
+  const codec = (codecs ?? '').toLowerCase()
+  if (mime === 'application/mp4' && (codec.includes('stpp') || codec.includes('wvtt'))) return true
   return false
 }
 
@@ -454,43 +472,11 @@ function subtitleUrls(
       if (merged && 'error' in merged) return { note: merged.error }
       template = merged
     }
-    if (!template?.media) return { note: DASH_TEXT.unsupportedTemplate }
-    const mediaTemplate = template.media
-    const timescale = template.timescale && template.timescale > 0 ? template.timescale : 1
-    const startNumber = template.startNumber ?? 1
-    let points: Array<{ time: number; number: number }>
-    if (template.timeline) {
-      const expanded = expandTimeline(template.timeline, timescale, periodSeconds)
-      if ('error' in expanded) return { note: expanded.error }
-      points = expanded
-    } else if (template.duration && template.duration > 0 && periodSeconds > 0) {
-      const count = Math.ceil(periodSeconds / (template.duration / timescale) - 1e-8)
-      if (!Number.isFinite(count) || count < 1) return { note: DASH_TEXT.unknownCount }
-      if (count > MAX_SEGMENTS) return { note: DASH_TEXT.tooMany }
-      const step = template.duration
-      points = Array.from({ length: count }, (_, number) => ({ time: number * step, number }))
-    } else if (template.endNumber !== undefined && template.endNumber >= startNumber) {
-      const count = template.endNumber - startNumber + 1
-      if (count > MAX_SEGMENTS) return { note: DASH_TEXT.tooMany }
-      points = Array.from({ length: count }, (_, number) => ({ time: number, number }))
-    } else {
-      return { note: DASH_TEXT.unknownCount }
-    }
-    const urls: string[] = []
-    for (const point of points) {
-      const filled = fillDashTemplate(mediaTemplate, {
-        RepresentationID: representationId,
-        Bandwidth: bandwidth,
-        Number: startNumber + point.number,
-        Time: point.time,
-      })
-      if (!filled) return { note: DASH_TEXT.unsupportedTemplate }
-      const url = resolveAgainst(baseUrl, filled)
-      if (!url) return { note: DASH_TEXT.badSegmentUrl }
-      urls.push(url)
-    }
-    if (urls.length === 0) return { note: SUBTITLE_TEXT.noUrl }
-    return { urls }
+    if (!template) return { note: DASH_TEXT.unsupportedTemplate }
+    const listed = urlsFromTemplate(template, representationId, bandwidth, baseUrl, periodSeconds)
+    if ('error' in listed) return { note: listed.error }
+    if (listed.urls.length === 0) return { note: SUBTITLE_TEXT.noUrl }
+    return { urls: listed.urls }
   }
   const single = singleFileUrl(manifestUrl, baseUrl)
   if (!single) return { note: SUBTITLE_TEXT.noUrl }
@@ -650,8 +636,8 @@ export function parseMpd(xml: string, manifestUrl: string): DashParseResult {
       if (!id) return fail(DASH_TEXT.missingId)
       const mime = (attr(representation, 'mimeType') ?? adaptationMime ?? '').toLowerCase()
       const contentType = attr(representation, 'contentType') ?? adaptationType
-      if (isTextTrack(mime, contentType)) {
-        const codecs = attr(representation, 'codecs') ?? adaptationCodecs
+      const codecs = attr(representation, 'codecs') ?? adaptationCodecs
+      if (isTextTrack(mime, contentType, codecs)) {
         const language = attr(representation, 'lang') ?? adaptationLang
         const format = subtitleFormat(mime, codecs)
         const label = subtitleLabel(language, textOf(firstChild(representation, 'Label')) ?? adaptationLabel, id)

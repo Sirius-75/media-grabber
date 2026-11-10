@@ -3,7 +3,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import type { MediaItem } from '../src/shared/types'
-import { bindListActions, renderList, type ShownSubtitles } from '../src/popup/view'
+import { bindListActions, renderList, subtitleFormatKey, type ShownSubtitles } from '../src/popup/view'
 
 const hls: MediaItem = {
   url: 'https://cdn.example/master.m3u8',
@@ -50,5 +50,19 @@ describe('列表里的字幕', () => {
       { url: hls.url, trackId: 'https://cdn.example/zh.m3u8', format: 'srt' },
     ])
     expect(list.querySelectorAll('[data-track="stpp"]')).toHaveLength(0)
+  })
+
+  it('重画时恢复这条字幕选过的 .srt', () => {
+    document.body.innerHTML = '<ul id="list"></ul>'
+    const list = document.querySelector('#list')
+    if (!(list instanceof HTMLElement)) throw new Error('缺少列表')
+    const shown = new Map<string, ShownSubtitles>([
+      [hls.url, { tracks: [{ id: 'https://cdn.example/zh.m3u8', label: '中文', format: 'vtt' }] }],
+    ])
+    const preferred = new Map<string, 'vtt' | 'srt'>([[subtitleFormatKey(hls.url, 'https://cdn.example/zh.m3u8'), 'srt']])
+    renderList(list, [hls], undefined, undefined, undefined, undefined, undefined, undefined, shown, preferred)
+    const select = list.querySelector('select.subtitle-format')
+    if (!(select instanceof HTMLSelectElement)) throw new Error('缺少格式选择')
+    expect(select.value).toBe('srt')
   })
 })

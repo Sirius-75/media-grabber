@@ -301,6 +301,12 @@ export interface ListActions {
   onBilibiliAudio?: (url: string, button: HTMLButtonElement) => void
   onBilibiliCancel?: (url: string, button: HTMLButtonElement) => void
   onSubtitleDownload?: (url: string, trackId: string, format: 'vtt' | 'srt', button: HTMLButtonElement) => void
+  onSubtitleFormat?: (url: string, trackId: string, format: 'vtt' | 'srt') => void
+}
+
+/** 一条字幕在某份清单里的格式选择。重画时用它恢复 .srt / .vtt。 */
+export function subtitleFormatKey(url: string, trackId: string): string {
+  return `${url}\n${trackId}`
 }
 
 /** 把当前列表画进 ul。调用方保留 ul 上的点击监听，这里只换子节点。 */
@@ -314,6 +320,7 @@ export function renderList(
   bilibiliJobs?: HlsJobMap,
   queue?: DownloadQueueState,
   subtitles?: ReadonlyMap<string, ShownSubtitles>,
+  preferredSubtitleFormat?: ReadonlyMap<string, 'vtt' | 'srt'>,
 ): void {
   const pairAudio = items.some((item) => item.bilibili?.role === 'audio')
   const ordered = orderForPopup(items)
@@ -329,6 +336,7 @@ export function renderList(
       pairAudio,
       queuedPositionForItem(item, queue),
       subtitles?.get(item.url),
+      preferredSubtitleFormat,
     ),
   )
   list.replaceChildren(...rows)
@@ -392,7 +400,16 @@ export function bindListActions(
   list.addEventListener('change', (event) => {
     const select = event.target
     if (!(select instanceof HTMLSelectElement) || !list.contains(select)) return
-    if (select.classList.contains('subtitle-format')) return
+    if (select.classList.contains('subtitle-format')) {
+      const row = select.closest('.item')
+      if (!(row instanceof HTMLElement)) return
+      const index = Number(row.dataset.index)
+      const item = getItems()[index]
+      const trackId = select.parentElement?.querySelector('button')?.getAttribute('data-track') ?? ''
+      if (!item || !trackId) return
+      actions.onSubtitleFormat?.(item.url, trackId, select.value === 'srt' ? 'srt' : 'vtt')
+      return
+    }
     const row = select.closest('.item')
     if (!(row instanceof HTMLElement)) return
     const index = Number(row.dataset.index)
@@ -435,6 +452,7 @@ function renderItem(
   pairAudio: boolean,
   queuedPosition: number | undefined,
   subtitles: ShownSubtitles | undefined,
+  preferredSubtitleFormat: ReadonlyMap<string, 'vtt' | 'srt'> | undefined,
 ): HTMLLIElement {
   const row = document.createElement('li')
   row.className = 'item'
@@ -626,7 +644,7 @@ function renderItem(
   }
 
   row.append(actions)
-  appendSubtitles(row, subtitles)
+  appendSubtitles(row, item.url, subtitles, preferredSubtitleFormat)
   if (hls) {
     const message =
       hls.phase === 'queued' ? (queuedPosition === undefined ? '排队中' : queuedStatusText(queuedPosition)) : hls.message
@@ -700,7 +718,12 @@ function appendDashButtons(actions: HTMLElement, dashJob?: HlsJobRecord): void {
   }
 }
 
-function appendSubtitles(row: HTMLElement, shown: ShownSubtitles | undefined): void {
+function appendSubtitles(
+  row: HTMLElement,
+  itemUrl: string,
+  shown: ShownSubtitles | undefined,
+  preferredSubtitleFormat: ReadonlyMap<string, 'vtt' | 'srt'> | undefined,
+): void {
   if (!shown) return
   if (shown.error) {
     const note = document.createElement('p')
@@ -737,6 +760,7 @@ function appendSubtitles(row: HTMLElement, shown: ShownSubtitles | undefined): v
         option.textContent = text
         select.append(option)
       }
+      if (preferredSubtitleFormat?.get(subtitleFormatKey(itemUrl, track.id)) === 'srt') select.value = 'srt'
       const button = document.createElement('button')
       button.type = 'button'
       button.dataset.action = 'subtitle-download'

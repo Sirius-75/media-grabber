@@ -50,7 +50,7 @@ import {
   type SubtitleDownloadMessage,
 } from '../shared/messages'
 import { PREFERENCES_STORAGE_KEY, readPreferences } from '../shared/preferences'
-import type { SubtitleTrackView } from '../shared/subtitles'
+import { shouldShowAutomaticSubtitleError, type SubtitleTrackView } from '../shared/subtitles'
 import type { MediaItem } from '../shared/types'
 import {
   bindListActions,
@@ -60,6 +60,7 @@ import {
   pageTitleText,
   renderList,
   setRowStatus,
+  subtitleFormatKey,
   statusFromDownloadResponse,
   type ShownSubtitles,
 } from './view.ts'
@@ -81,8 +82,16 @@ let queue: DownloadQueueState = emptyQueue()
 let retries: DownloadRetryMap = {}
 /** 用户在清晰度列表里点过的地址。DASH 里存的是 Representation id。重画时不要跳回默认项。 */
 const preferredVariant = new Map<string, string>()
+/** 每条字幕选过的 .vtt / .srt。进度更新会重画列表，不能把选择刷回默认的 .vtt。 */
+const preferredSubtitleFormat = new Map<string, 'vtt' | 'srt'>()
 const subtitleState = new Map<string, ShownSubtitles>()
 const subtitleRequested = new Set<string>()
+const SUBTITLE_INSPECT_CACHE_KEY = 'media-grabber-subtitle-inspect'
+
+interface SubtitleInspectCacheEntry {
+  tracks: SubtitleTrackView[]
+  error?: string
+}
 
 function wantsSeparate(): boolean {
   const box = document.querySelector('#separate-media')
@@ -135,7 +144,18 @@ function paint(): void {
   countEl.textContent = `共 ${items.length} 条`
   clearButton.disabled = tabId === undefined || items.length === 0
   paintPageTitle()
-  renderList(listEl, items, statuses, jobs, preferredVariant, dashJobs, bilibiliJobs, queue, subtitleState)
+  renderList(
+    listEl,
+    items,
+    statuses,
+    jobs,
+    preferredVariant,
+    dashJobs,
+    bilibiliJobs,
+    queue,
+    subtitleState,
+    preferredSubtitleFormat,
+  )
   const isEmpty = items.length === 0
   emptyEl.hidden = !isEmpty
   listEl.hidden = isEmpty
@@ -999,11 +1019,72 @@ function isSubtitleTrack(value: unknown): value is SubtitleTrackView {
   return true
 }
 
+function readSubtitleInspectCache(value: unknown): Record<string, SubtitleInspectCacheEntry> {
+  if (typeof value !== 'object' || value === null) return {}
+  const cache: Record<string, SubtitleInspectCacheEntry> = {}
+  for (const [url, entry] of Object.entries(value)) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const tracks = 'tracks' in entry && Array.isArray(entry.tracks) ? entry.tracks.filter(isSubtitleTrack) : []
+    const error = 'error' in entry && typeof entry.error === 'string' ? entry.error.trim() : ''
+    const stored: SubtitleInspectCacheEntry = { tracks }
+    if (error) stored.error = error
+    cache[url] = stored
+  }
+  return cache
+}
+
+function applySubtitleInspect(url: string, entry: SubtitleInspectCacheEntry): void {
+  if (entry.error && shouldShowAutomaticSubtitleError(entry.error)) {
+    subtitleState.set(url, { tracks: [], error: entry.error })
+    return
+  }
+  if (entry.tracks.length > 0) subtitleState.set(url, { tracks: entry.tracks })
+}
+
+let subtitleInspectMemory: Record<string, SubtitleInspectCacheEntry> | undefined
+let subtitleInspectWrite: Promise<void> = Promise.resolve()
+
+async function loadSubtitleInspectCache(): Promise<Record<string, SubtitleInspectCacheEntry>> {
+  if (subtitleInspectMemory) return subtitleInspectMemory
+  try {
+    const stored = await chrome.storage.session.get(SUBTITLE_INSPECT_CACHE_KEY)
+    subtitleInspectMemory = readSubtitleInspectCache(stored[SUBTITLE_INSPECT_CACHE_KEY])
+  } catch {
+    subtitleInspectMemory = {}
+  }
+  return subtitleInspectMemory
+}
+
+/** 成功结果和 DRM 结果才写入。多次同时完成时排队写，避免后一次盖掉前一次。 */
+function rememberSubtitleInspect(url: string, entry: SubtitleInspectCacheEntry): Promise<void> {
+  const task = subtitleInspectWrite.then(async () => {
+    const cache = await loadSubtitleInspectCache()
+    cache[url] = entry
+    subtitleInspectMemory = cache
+    await chrome.storage.session.set({ [SUBTITLE_INSPECT_CACHE_KEY]: cache })
+  })
+  subtitleInspectWrite = task.then(
+    () => undefined,
+    () => undefined,
+  )
+  return task.catch(() => undefined)
+}
+
 async function refreshSubtitles(): Promise<void> {
+  const cache = await loadSubtitleInspectCache()
   const targets = items.filter((item) => {
     if (item.kind !== 'hls' && item.kind !== 'dash') return false
     return item.url.startsWith('http://') || item.url.startsWith('https://')
   })
+  let painted = false
+  for (const item of targets) {
+    const cached = cache[item.url]
+    if (!cached) continue
+    subtitleRequested.add(item.url)
+    applySubtitleInspect(item.url, cached)
+    painted = true
+  }
+  if (painted) paint()
   await Promise.all(
     targets.map(async (item) => {
       if (subtitleRequested.has(item.url)) return
@@ -1016,15 +1097,15 @@ async function refreshSubtitles(): Promise<void> {
         if (typeof response !== 'object' || response === null || !('ok' in response)) return
         if (response.ok === false && 'error' in response && typeof response.error === 'string' && response.error.trim()) {
           const error = response.error.trim()
-          // 自动检查失败时，只把加密 / DRM / 明确不支持留在列表上。网络失败不挡住这一行。
-          if (/加密|DRM|不支持/.test(error)) {
-            subtitleState.set(item.url, { tracks: [], error })
-            paint()
-          }
+          if (!shouldShowAutomaticSubtitleError(error)) return
+          subtitleState.set(item.url, { tracks: [], error })
+          paint()
+          await rememberSubtitleInspect(item.url, { tracks: [], error })
           return
         }
         if (response.ok !== true || !('tracks' in response) || !Array.isArray(response.tracks)) return
         const tracks = response.tracks.filter(isSubtitleTrack)
+        await rememberSubtitleInspect(item.url, { tracks })
         if (tracks.length === 0) return
         subtitleState.set(item.url, { tracks })
         paint()
@@ -1190,6 +1271,9 @@ function start(): void {
     },
     onDashVariant(url, representationId) {
       preferredVariant.set(url, representationId)
+    },
+    onSubtitleFormat(url, trackId, format) {
+      preferredSubtitleFormat.set(subtitleFormatKey(url, trackId), format)
     },
     onBilibiliDownload(url) {
       void requestBilibiliDownload(url, 'video-only')

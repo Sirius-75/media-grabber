@@ -225,6 +225,160 @@ describe('popup 下载状态', () => {
   })
 })
 
+describe('popup 字幕检查', () => {
+  const track = { id: 'https://cdn.example/zh.m3u8', label: '中文', format: 'vtt' as const }
+
+  async function openHlsPopup(): Promise<void> {
+    mediaItems = [hls]
+    document.body.innerHTML = `
+      <header class="bar">
+        <div class="titles"><h1>Media Grabber</h1><p id="count">正在读取…</p></div>
+        <button id="clear" type="button" disabled>清空</button>
+      </header>
+      <p id="banner" class="banner" hidden></p>
+      <p id="page-title" class="page-title" hidden></p>
+      <p id="empty" class="empty" hidden>当前页面还没有发现音视频。</p>
+      <ul id="list" class="list"></ul>
+    `
+    vi.resetModules()
+    await import('../src/popup/main.ts')
+    await vi.waitFor(() => expect(document.querySelectorAll('.item')).toHaveLength(1))
+  }
+
+  it('进度更新重画后仍保留选过的 .srt', async () => {
+    const mock = chrome.runtime.sendMessage as (message: unknown) => Promise<unknown>
+    chrome.runtime.sendMessage = async (message: unknown) => {
+      sent.push(message)
+      if (typeof message === 'object' && message !== null && 'type' in message && message.type === 'SUBTITLE_INSPECT') {
+        return { ok: true, tracks: [track] }
+      }
+      return mock(message)
+    }
+    chrome.storage.session.set = async () => undefined
+    await openHlsPopup()
+    await vi.waitFor(() => expect(document.querySelector('select.subtitle-format')).toBeTruthy())
+    const select = document.querySelector('select.subtitle-format')
+    if (!(select instanceof HTMLSelectElement)) throw new Error('缺少格式选择')
+    select.value = 'srt'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    storageListeners[0]?.(
+      {
+        [DOWNLOAD_STATUS_STORAGE_KEY]: {
+          newValue: { [hls.url]: { phase: 'started', message: '正在下载 1/2', updatedAt: 2 } },
+        },
+      },
+      'session',
+    )
+    const again = document.querySelector('select.subtitle-format')
+    if (!(again instanceof HTMLSelectElement)) throw new Error('重画后缺少格式选择')
+    expect(again.value).toBe('srt')
+  })
+
+  it('直播这类拒绝不显示，也不缓存，重开还会再查', async () => {
+    const cache: Record<string, unknown> = {}
+    chrome.storage.session.get = async () => ({ ...cache })
+    chrome.storage.session.set = async (value: Record<string, unknown>) => {
+      Object.assign(cache, value)
+    }
+    chrome.runtime.sendMessage = async (message: unknown) => {
+      sent.push(message)
+      if (typeof message === 'object' && message !== null && 'type' in message) {
+        if (message.type === 'GET_MEDIA') return mediaItems
+        if (message.type === 'SUBTITLE_INSPECT') return { ok: false, error: '这是直播流（MPD type=dynamic），暂不支持下载' }
+      }
+      return undefined
+    }
+    await openHlsPopup()
+    await vi.waitFor(() => expect(sent.filter((message) => isInspect(message)).length).toBe(1))
+    expect(document.body.textContent).not.toContain('暂不支持下载')
+    expect(cache['media-grabber-subtitle-inspect']).toBeUndefined()
+    await openHlsPopup()
+    await vi.waitFor(() => expect(sent.filter((message) => isInspect(message)).length).toBe(2))
+  })
+
+  it('网络失败不缓存；DRM 结果会缓存，重开不再请求', async () => {
+    const cache: Record<string, unknown> = {}
+    let mode: 'fail' | 'drm' = 'fail'
+    chrome.storage.session.get = async () => ({ ...cache })
+    chrome.storage.session.set = async (value: Record<string, unknown>) => {
+      Object.assign(cache, value)
+    }
+    chrome.runtime.sendMessage = async (message: unknown) => {
+      sent.push(message)
+      if (typeof message === 'object' && message !== null && 'type' in message) {
+        if (message.type === 'GET_MEDIA') return mediaItems
+        if (message.type === 'SUBTITLE_INSPECT') {
+          if (mode === 'fail') return undefined
+          return { ok: false, error: '清单含有 DRM（Widevine、PlayReady 或 FairPlay），不支持' }
+        }
+      }
+      return undefined
+    }
+    await openHlsPopup()
+    await vi.waitFor(() => expect(sent.filter((message) => isInspect(message)).length).toBe(1))
+    expect(cache['media-grabber-subtitle-inspect']).toBeUndefined()
+    await openHlsPopup()
+    await vi.waitFor(() => expect(sent.filter((message) => isInspect(message)).length).toBe(2))
+
+    mode = 'drm'
+    await openHlsPopup()
+    await vi.waitFor(() => expect(document.body.textContent).toContain('DRM'))
+    const inspects = sent.filter((message) => isInspect(message)).length
+    await openHlsPopup()
+    await vi.waitFor(() => expect(document.body.textContent).toContain('DRM'))
+    expect(sent.filter((message) => isInspect(message)).length).toBe(inspects)
+  })
+
+  it('两份清单同时写缓存时都还在', async () => {
+    const hls2: MediaItem = { ...hls, url: 'https://cdn.example/other.m3u8' }
+    mediaItems = [hls, hls2]
+    const cache: Record<string, unknown> = {}
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let setCalls = 0
+    chrome.storage.session.get = async () => ({ ...cache })
+    chrome.storage.session.set = async (value: Record<string, unknown>) => {
+      setCalls += 1
+      if (setCalls === 1) await gate
+      Object.assign(cache, value)
+    }
+    chrome.runtime.sendMessage = async (message: unknown) => {
+      sent.push(message)
+      if (typeof message === 'object' && message !== null && 'type' in message) {
+        if (message.type === 'GET_MEDIA') return mediaItems
+        if (message.type === 'SUBTITLE_INSPECT' && 'url' in message && typeof message.url === 'string') {
+          return { ok: true, tracks: [{ id: `${message.url}/zh.vtt`, label: '中文', format: 'vtt' }] }
+        }
+      }
+      return undefined
+    }
+    document.body.innerHTML = `
+      <header class="bar">
+        <div class="titles"><h1>Media Grabber</h1><p id="count">正在读取…</p></div>
+        <button id="clear" type="button" disabled>清空</button>
+      </header>
+      <p id="banner" class="banner" hidden></p>
+      <p id="page-title" class="page-title" hidden></p>
+      <p id="empty" class="empty" hidden>当前页面还没有发现音视频。</p>
+      <ul id="list" class="list"></ul>
+    `
+    vi.resetModules()
+    await import('../src/popup/main.ts')
+    await vi.waitFor(() => expect(sent.filter((message) => isInspect(message)).length).toBe(2))
+    release()
+    await vi.waitFor(() => {
+      const saved = cache['media-grabber-subtitle-inspect']
+      expect(saved && typeof saved === 'object' && hls.url in saved && hls2.url in saved).toBe(true)
+    })
+  })
+})
+
+function isInspect(message: unknown): boolean {
+  return typeof message === 'object' && message !== null && 'type' in message && message.type === 'SUBTITLE_INSPECT'
+}
+
 describe('popup DASH 按钮', () => {
   async function openDashPopup(): Promise<void> {
     mediaItems = [dash]
