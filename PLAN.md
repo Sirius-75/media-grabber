@@ -520,6 +520,6 @@ V4-1 到 V4-5 全部完成，版本升到 0.3.0：下载文件名带清晰度、
 
 带 `EXT-X-MAP` 的 HLS fMP4（点播和直播录制）在保存前走 `src/shared/fmp4-rebase.ts`。它从初始化段的每个 `trak` 读出 `tkhd.track_ID` 和 `mdhd.timescale`，扫描所有 `moof/traf/tfhd/tfdt`，取每条轨道第一个 `tfdt` 换算成秒后的最小值 t0，每条轨道再减去 `round(t0 × 该轨 timescale)`。这样视频从 0 开始，音频保留约 0.011 秒的相对偏移。支持 `tfdt` version 0（32 位）和 version 1（64 位），减完不允许为负，version 0 仍写 32 位。
 
-只改 `tfdt` 的 4 / 8 字节，不重编码，也不动 `mdat`。为了不在内存里再复制整份文件，解析和校验全部通过后原地改字节；解析失败时一个字节都不改，`planHlsSave` 原样保存，下载仍然成功。输入超过 `HLS_REMUX_MAX_INPUT_BYTES` 时跳过归零。TS→mp4（mux.js 路径）本来就从 0 开始，不动。
+只改 `tfdt` 的 4 / 8 字节，不重编码，也不动 `mdat`。为了不在内存里再复制整份文件，解析和校验全部通过后原地改字节；解析失败时一个字节都不改，`planHlsSave` 原样保存，下载仍然成功。因为是原地修改，超过 `HLS_REMUX_MAX_INPUT_BYTES` 的长直播录制也照样归零。TS→mp4（mux.js 路径）本来就从 0 开始，不动。
 
 真实测试用 ffmpeg 生成带 A/V 的碎片 fMP4，把时间轴抬到 46560 秒后归零，检查 ffprobe 起点约为 0、时长不变、ffmpeg 解码零错误；没有 ffmpeg 时自动跳过。单元测试覆盖 version 0/1、多轨相对偏移、已经为 0、坏数据和 `planHlsSave` 回退。

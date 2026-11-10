@@ -237,7 +237,7 @@ describe('fMP4 时间轴归零', () => {
     if (broken.ok) expect(broken.parts.map((part) => [...part])).toEqual([[1, 2, 3], [4]])
   })
 
-  it('超过输入上限时不解析，直接原样保存', async () => {
+  it('超过转封装输入上限时仍然归零（原地改 tfdt，不复制）', async () => {
     const init = initSegment([{ id: 1, timescale: 90000 }])
     const media = fragment([{ trackId: 1, value: 4190426910n }], 1)
     const saved = await planHlsSave({
@@ -247,6 +247,9 @@ describe('fMP4 时间轴归零', () => {
       maxInputBytes: 8,
     })
     expect(saved).toMatchObject({ ok: true, ext: 'mp4', message: HLS_TEXT.complete })
-    if (saved.ok) expect(readTfdtValues(saved.parts)).toEqual([4190426910n])
+    if (saved.ok) {
+      expect(readTfdtValues(saved.parts)).toEqual([0n])
+      expect(saved.parts[1]).toBe(media)
+    }
   })
 })

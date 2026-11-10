@@ -129,7 +129,7 @@ export async function remuxTsSegments(input: {
 /**
  * 决定最终保存成什么。
  * container 为 mp4 时是 fMP4 路径：分片字节和扩展名都不变，只把 tfdt 归零。
- * 解析不了或文件超过内存上限时仍原样保存，不让下载失败。
+ * 解析不了时仍原样保存，不让下载失败。大文件也归零，因为只原地改 tfdt。
  */
 export async function planHlsSave(input: {
   container: 'ts' | 'mp4'
@@ -142,16 +142,7 @@ export async function planHlsSave(input: {
   maxOutputBytes?: number
 }): Promise<HlsSavePlan> {
   if (input.container === 'mp4') {
-    const maxInputBytes = input.maxInputBytes ?? HLS_REMUX_MAX_INPUT_BYTES
-    if (totalBytes(input.parts) > maxInputBytes) {
-      return {
-        ok: true,
-        ext: 'mp4',
-        mime: 'video/mp4',
-        parts: [...input.parts],
-        message: HLS_TEXT.complete,
-      }
-    }
+    // 归零是原地改 tfdt，不复制分片，所以不受转封装的输入上限限制，长直播录制也要归零。
     const rebased = rebaseFmp4Parts(input.parts)
     return {
       ok: true,
