@@ -101,11 +101,29 @@ function rawCuePayload(raw: string): string {
   return raw.replace(/\s+\n/g, '\n').trim()
 }
 
-/** SRT 只保留 i、b、u。其它标签去掉，HTML 转义先还原。 */
+function isSimpleStyleTag(tag: string): boolean {
+  return /^<\/?(i|b|u)(\s[^>]*)?>$/i.test(tag)
+}
+
+function escapeVttText(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/**
+ * SRT 只保留原文里已经是标签的 i、b、u。
+ * `&lt;b&gt;` 这种转义还原后不能变成真正的标签，所以先藏起真标签，再把解码出来的 `<` `>` 重新转义。
+ */
 function srtCuePayload(raw: string): string {
-  const decoded = decodeEntities(raw)
-  const kept = decoded.replace(/<[^>]+>/g, (tag) => (/^<\/?(i|b|u)(\s[^>]*)?>$/i.test(tag) ? tag : ''))
-  return kept.replace(/\s+\n/g, '\n').trim()
+  const kept: string[] = []
+  const withoutOtherTags = raw.replace(/<[^>]+>/g, (tag) => {
+    if (!isSimpleStyleTag(tag)) return ''
+    kept.push(tag)
+    return `\u0000${kept.length - 1}\u0000`
+  })
+  const decoded = decodeEntities(withoutOtherTags)
+  const escaped = escapeVttText(decoded)
+  const restored = escaped.replace(/\u0000(\d+)\u0000/g, (_whole, index: string) => kept[Number(index)] ?? '')
+  return restored.replace(/\s+\n/g, '\n').trim()
 }
 
 function plainCuePayload(raw: string): string {
@@ -176,8 +194,13 @@ function relativeShift(
   if (cues.length === 0 || placed.length === 0) return 0
   const minStart = Math.min(...cues.map((cue) => cue.startMs))
   if (segmentDurationMs !== undefined && cumulativeMs > 0) {
-    // 这一段的时间还停在累计起点之前，说明它是从本段 0 点起算的。
-    if (minStart + 500 < cumulativeMs) return cumulativeMs
+    // 每一句都早于累计起点，并且都不是已经放过的同一句，才按相对时间顺延。
+    // 绝对时间里重复出现的跨段 cue 不满足，避免被再复制一份。
+    const chain = cues.every((cue) => {
+      if (cue.startMs >= cumulativeMs) return false
+      return !placed.some((existing) => sameCue(existing, cue))
+    })
+    if (chain) return cumulativeMs
     return 0
   }
   const prevEnd = placed.reduce((max, cue) => Math.max(max, cue.endMs), 0)
@@ -318,7 +341,7 @@ export function ttmlToVtt(xml: string): string {
   const lines = ['WEBVTT', '']
   for (const cue of cues) {
     lines.push(`${formatTimestamp(cue.startMs, '.')} --> ${formatTimestamp(cue.endMs, '.')}`)
-    lines.push(cue.payload)
+    lines.push(escapeVttText(cue.payload))
     lines.push('')
   }
   return `${lines.join('\n').trim()}\n`

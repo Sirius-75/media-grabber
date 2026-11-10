@@ -58,23 +58,47 @@ describe('WebVTT 时间戳映射', () => {
     expect(merged).toContain('回绕后')
   })
 
-  it('写出 VTT 时保留转义和样式标签，SRT 只解码并留下 i、b、u', () => {
+  it('写出 VTT 时保留转义和样式标签，SRT 只保留原文里的 i、b、u', () => {
     const source = 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n&lt;b&gt;粗体&lt;/b&gt; <i>斜体</i> <c.red>红</c>\n'
     const merged = mergeWebVttSegments([{ text: source }])
     expect(merged).toContain('&lt;b&gt;粗体&lt;/b&gt; <i>斜体</i> <c.red>红</c>')
     const srt = webVttToSrt(merged)
-    expect(srt).toContain('<b>粗体</b> <i>斜体</i> 红')
+    expect(srt).toContain('&lt;b&gt;粗体&lt;/b&gt; <i>斜体</i> 红')
+    expect(srt).not.toContain('<b>')
     expect(srt).not.toContain('<c')
-    expect(srt).not.toContain('&lt;')
   })
 
   it('有分片时长时，第一句超过 1 秒的相对时间也会按累计起点顺延', () => {
     const merged = mergeWebVttSegments([
-      { text: 'WEBVTT\n\n00:00:00.000 --> 00:00:05.000\nA\n', duration: 6 },
-      { text: 'WEBVTT\n\n00:00:01.500 --> 00:00:02.500\nB\n', duration: 6 },
+      { text: 'WEBVTT\n\n00:00:01.500 --> 00:00:02.500\nA\n', duration: 4 },
+      { text: 'WEBVTT\n\n00:00:01.500 --> 00:00:02.500\nB\n', duration: 4 },
+      { text: 'WEBVTT\n\n00:00:01.500 --> 00:00:02.500\nC\n', duration: 4 },
     ])
-    expect(merged).toContain('00:00:07.500 --> 00:00:08.500')
-    expect(merged).toContain('B')
+    expect(merged).toContain('00:00:01.500 --> 00:00:02.500')
+    expect(merged).toContain('00:00:05.500 --> 00:00:06.500')
+    expect(merged).toContain('00:00:09.500 --> 00:00:10.500')
+  })
+
+  it('绝对时间里重复的跨段 cue 不会被顺延复制', () => {
+    const cross = '00:00:00.500 --> 00:00:05.000\n跨段'
+    const merged = mergeWebVttSegments([
+      { text: `WEBVTT\n\n${cross}\n`, duration: 2 },
+      { text: `WEBVTT\n\n${cross}\n\n00:00:02.500 --> 00:00:03.500\n后句\n`, duration: 2 },
+      { text: `WEBVTT\n\n${cross}\n`, duration: 2 },
+    ])
+    expect(merged.match(/跨段/g)).toHaveLength(1)
+    expect(merged).toContain('00:00:02.500 --> 00:00:03.500')
+    expect(merged).toContain('后句')
+    expect(merged).not.toContain('00:00:04.500')
+  })
+
+  it('TTML 写入 VTT 时重新转义 & < >', () => {
+    const xml = `<?xml version="1.0"?><tt><body><div><p begin="00:00:01.000" end="00:00:02.000">A &amp; B &lt; C &gt; D</p></div></body></tt>`
+    const file = assembleSubtitleFile({ format: 'vtt', segments: [{ text: xml, kind: 'ttml' }] })
+    expect(file.ok).toBe(true)
+    if (!file.ok) return
+    expect(file.body).toContain('A &amp; B &lt; C &gt; D')
+    expect(file.body).not.toContain('A & B')
   })
 
   it('可以转成 SRT，毫秒用逗号', () => {

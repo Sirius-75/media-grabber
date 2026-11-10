@@ -5,7 +5,8 @@
  * 按 EXT-X-MEDIA-SEQUENCE 去重：滚动窗口里重复出现的分片不会再下一次。
  * 默认从直播边缘开始：第一份非空窗口里只收录序号最大的分片，更早的跳过。
  * 如果点击后第一次轮询还是空窗，随后第一份出现的分片都算点击之后的，整窗收录。
- * 序号大幅回退（比窗口长度再多留两片）时当成清单重置，重新按边缘对齐，已下过的地址不再请求。
+ * 序号大幅回退时，要连续两轮都是低序号，或这一轮带 EXT-X-DISCONTINUITY，才当成清单重置。
+ * 只出现一次的低序号窗口视为过期清单，不写入。确认重置后文件名可以复用，去重集合会清空。
  * includeExistingSegments 为 true 时改回旧行为，窗口里已有的分片都写入。
  * 支持点播已有的标准 AES-128：每一片下载后立刻解密，内存里只留明文。
  * 已录字节达到上限、清单出现 EXT-X-ENDLIST、长时间没有新分片、清单连续失败时自动停止。
@@ -213,8 +214,12 @@ export class HlsLiveRecorder {
   private anchored = false
   /** 锚定之前见过空窗。空窗之后的第一份分片都出现在点击之后，整窗收录。 */
   private sawEmptyWindow = false
-  /** 已经下过的分片地址。序号重置后重新对齐时，避免把同一地址再请求一次。 */
+  /** 已经下过的分片地址。确认序号重置后清空，因为编码器可能复用文件名。 */
   private readonly fetchedUrls = new Set<string>()
+  /** 窗口里出现过的地址，含没下载的。用来认出过期清单，不把旧分片再接上去。 */
+  private readonly seenUrls = new Set<string>()
+  /** 上一轮已经是偏低的序号窗口。再来一轮才确认重置。 */
+  private sawLowWindow = false
   private readonly includeExistingSegments: boolean
 
   constructor(options: HlsLiveOptions) {
@@ -357,13 +362,21 @@ export class HlsLiveRecorder {
       }
     }
 
-    this.noteSequenceReset(media)
+    const reset = this.noteSequenceReset(media)
+    const seenBefore = new Set(this.seenUrls)
+    if (reset === 'confirmed') {
+      this.fetchedUrls.clear()
+      this.seenUrls.clear()
+    }
     this.anchor(media)
     for (const segment of media.segments) {
       if (this.cancelSignal.aborted) return {}
       const sequence = segment.sequence
       if (sequence === undefined) continue
+      this.seenUrls.add(segment.url)
       if (this.nextSequence !== undefined && sequence < this.nextSequence) continue
+      // 偏低但还没确认的窗口：以前见过的地址直接跳过，也不把序号往回拨。
+      if (reset === 'hold' && seenBefore.has(segment.url)) continue
       if (this.fetchedUrls.has(segment.url)) {
         this.nextSequence = sequence + 1
         continue
@@ -420,23 +433,34 @@ export class HlsLiveRecorder {
 
   /**
    * 服务器把 media sequence 从高序号打回接近 0 时，旧的 nextSequence 会把新分片全部跳过。
-   * 新窗口的最大序号比 nextSequence 小过「窗口长度 + 余量」才重新锚定。
+   * 只出现一次的偏低窗口当成 CDN 返回了过期清单，不重新锚定。
+   * 连续两轮都偏低，或这一轮带 EXT-X-DISCONTINUITY，才确认重置。
    */
-  private noteSequenceReset(media: HlsMedia): void {
-    if (this.nextSequence === undefined) return
+  private noteSequenceReset(media: HlsMedia): 'confirmed' | 'hold' | 'none' {
+    if (this.nextSequence === undefined) return 'none'
     let highest: number | undefined
     let count = 0
+    let discontinuity = false
     for (const segment of media.segments) {
+      if (segment.discontinuity) discontinuity = true
       if (segment.sequence === undefined) continue
       count += 1
       if (highest === undefined || segment.sequence > highest) highest = segment.sequence
     }
-    if (highest === undefined) return
-    if (highest + count + LIVE_SEQUENCE_RESET_MARGIN < this.nextSequence) {
-      this.nextSequence = undefined
-      this.anchored = false
-      this.sawEmptyWindow = false
+    const low = highest !== undefined && highest + count + LIVE_SEQUENCE_RESET_MARGIN < this.nextSequence
+    if (!low) {
+      this.sawLowWindow = false
+      return 'none'
     }
+    if (!discontinuity && !this.sawLowWindow) {
+      this.sawLowWindow = true
+      return 'hold'
+    }
+    this.sawLowWindow = false
+    this.nextSequence = undefined
+    this.anchored = false
+    this.sawEmptyWindow = false
+    return 'confirmed'
   }
 
   private pushPart(bytes: Uint8Array): boolean {

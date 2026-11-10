@@ -14,9 +14,14 @@ import { formatBytes } from '../src/shared/format'
 
 const PLAYLIST = 'https://cdn.example/live/index.m3u8'
 
-function playlist(sequence: number, names: string[], options: { end?: boolean; key?: string } = {}): string {
+function playlist(
+  sequence: number,
+  names: string[],
+  options: { end?: boolean; key?: string; discontinuity?: boolean } = {},
+): string {
   const lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:2', `#EXT-X-MEDIA-SEQUENCE:${sequence}`]
   if (options.key) lines.push(`#EXT-X-KEY:METHOD=AES-128,URI="${options.key}"`)
+  if (options.discontinuity) lines.push('#EXT-X-DISCONTINUITY')
   for (const name of names) lines.push('#EXTINF:2,', name)
   if (options.end) lines.push('#EXT-X-ENDLIST')
   return lines.join('\n')
@@ -362,6 +367,70 @@ describe('直播从点击时的边缘开始', () => {
       'https://cdn.example/live/b.ts',
       'https://cdn.example/live/c.ts',
     ])
+  })
+
+  it('只出现一次的偏低窗口是过期清单，不把旧分片接到后面', async () => {
+    const harness = makeHarness({
+      includeExistingSegments: false,
+      playlists: [
+        playlist(14, ['a14.ts', 'a15.ts', 'a16.ts']),
+        playlist(9, ['a9.ts', 'a10.ts', 'a11.ts']),
+        playlist(17, ['a17.ts'], { end: true }),
+      ],
+      segments: {
+        'https://cdn.example/live/a9.ts': bytesOf('9'),
+        'https://cdn.example/live/a10.ts': bytesOf('10'),
+        'https://cdn.example/live/a11.ts': bytesOf('11'),
+        'https://cdn.example/live/a14.ts': bytesOf('14'),
+        'https://cdn.example/live/a15.ts': bytesOf('15'),
+        'https://cdn.example/live/a16.ts': bytesOf('16'),
+        'https://cdn.example/live/a17.ts': bytesOf('17'),
+      },
+    })
+    const result = await harness.recorder.run()
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(textOf(result.parts)).toBe('1617')
+    expect(harness.segmentCalls).toEqual([
+      'https://cdn.example/live/a16.ts',
+      'https://cdn.example/live/a17.ts',
+    ])
+  })
+
+  it('确认重置后复用的文件名会重新下载', async () => {
+    const seg = 'https://cdn.example/live/seg5.ts'
+    const bodies = new Map<string, Uint8Array>([[seg, bytesOf('OLD')]])
+    let playlistCall = 0
+    const segmentCalls: string[] = []
+    const playlists = [playlist(5, ['seg5.ts']), playlist(0, ['seg5.ts']), playlist(0, ['seg5.ts'], { end: true })]
+    const clock = { now: 0 }
+    const recorder = new HlsLiveRecorder({
+      playlistUrl: PLAYLIST,
+      cancelSignal: new AbortController().signal,
+      includeExistingSegments: false,
+      now: () => clock.now,
+      wait: async (ms) => {
+        clock.now += ms
+      },
+      fetchPlaylist: async () => {
+        playlistCall += 1
+        const body = playlists[playlistCall - 1]
+        if (!body) return { ok: false, status: 0, reason: 'network' }
+        return { ok: true, text: body }
+      },
+      fetchSegment: async (url) => {
+        segmentCalls.push(url)
+        const value = bodies.get(url)
+        if (!value) return { ok: false, status: 404 }
+        bodies.set(url, bytesOf('NEW'))
+        return { ok: true, bytes: value }
+      },
+    })
+    const recorded = await recorder.run()
+    expect(recorded.ok).toBe(true)
+    if (!recorded.ok) return
+    expect(textOf(recorded.parts)).toBe('OLDNEW')
+    expect(segmentCalls).toEqual([seg, seg])
   })
 
   it('fMP4 仍然先取初始化段，媒体分片只留边缘那一片', async () => {

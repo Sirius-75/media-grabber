@@ -1041,23 +1041,33 @@ function applySubtitleInspect(url: string, entry: SubtitleInspectCacheEntry): vo
   if (entry.tracks.length > 0) subtitleState.set(url, { tracks: entry.tracks })
 }
 
+let subtitleInspectMemory: Record<string, SubtitleInspectCacheEntry> | undefined
+let subtitleInspectWrite: Promise<void> = Promise.resolve()
+
 async function loadSubtitleInspectCache(): Promise<Record<string, SubtitleInspectCacheEntry>> {
+  if (subtitleInspectMemory) return subtitleInspectMemory
   try {
     const stored = await chrome.storage.session.get(SUBTITLE_INSPECT_CACHE_KEY)
-    return readSubtitleInspectCache(stored[SUBTITLE_INSPECT_CACHE_KEY])
+    subtitleInspectMemory = readSubtitleInspectCache(stored[SUBTITLE_INSPECT_CACHE_KEY])
   } catch {
-    return {}
+    subtitleInspectMemory = {}
   }
+  return subtitleInspectMemory
 }
 
-async function rememberSubtitleInspect(url: string, entry: SubtitleInspectCacheEntry): Promise<void> {
-  try {
+/** 成功结果和 DRM 结果才写入。多次同时完成时排队写，避免后一次盖掉前一次。 */
+function rememberSubtitleInspect(url: string, entry: SubtitleInspectCacheEntry): Promise<void> {
+  const task = subtitleInspectWrite.then(async () => {
     const cache = await loadSubtitleInspectCache()
     cache[url] = entry
+    subtitleInspectMemory = cache
     await chrome.storage.session.set({ [SUBTITLE_INSPECT_CACHE_KEY]: cache })
-  } catch {
-    // 记不住时，这次弹窗里的 subtitleRequested 仍然避免重复请求。
-  }
+  })
+  subtitleInspectWrite = task.then(
+    () => undefined,
+    () => undefined,
+  )
+  return task.catch(() => undefined)
 }
 
 async function refreshSubtitles(): Promise<void> {
@@ -1087,13 +1097,10 @@ async function refreshSubtitles(): Promise<void> {
         if (typeof response !== 'object' || response === null || !('ok' in response)) return
         if (response.ok === false && 'error' in response && typeof response.error === 'string' && response.error.trim()) {
           const error = response.error.trim()
-          const entry: SubtitleInspectCacheEntry = { tracks: [] }
-          if (shouldShowAutomaticSubtitleError(error)) {
-            entry.error = error
-            subtitleState.set(item.url, { tracks: [], error })
-            paint()
-          }
-          await rememberSubtitleInspect(item.url, entry)
+          if (!shouldShowAutomaticSubtitleError(error)) return
+          subtitleState.set(item.url, { tracks: [], error })
+          paint()
+          await rememberSubtitleInspect(item.url, { tracks: [], error })
           return
         }
         if (response.ok !== true || !('tracks' in response) || !Array.isArray(response.tracks)) return

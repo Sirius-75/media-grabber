@@ -194,6 +194,8 @@ export interface HlsSegment {
   aes128?: HlsAes128
   /** 这一片的 EXT-X-MEDIA-SEQUENCE。直播录制靠它去重。 */
   sequence?: number
+  /** 这一片前面有 EXT-X-DISCONTINUITY。 */
+  discontinuity?: boolean
 }
 
 export interface HlsMedia {
@@ -624,12 +626,17 @@ function parseMedia(lines: string[], playlistUrl: string): HlsPlaylist {
   let sawMediaSequence = false
   let targetDuration = 2
   let currentKey: AppliedKey = { method: 'NONE' }
+  let pendingDiscontinuity = false
 
   const pushUri = (raw: string): string | undefined => {
     if (raw.includes('{$')) return HLS_TEXT.variables
     const url = resolveHttp(playlistUrl, raw)
     if (!url) return HLS_TEXT.badUrl
     const segment: HlsSegment = { url, sequence: mediaSequence }
+    if (pendingDiscontinuity) {
+      segment.discontinuity = true
+      pendingDiscontinuity = false
+    }
     if (pending?.duration !== undefined) {
       segment.duration = pending.duration
       durationSum += pending.duration
@@ -668,6 +675,10 @@ function parseMedia(lines: string[], playlistUrl: string): HlsPlaylist {
     if (pending) return fail(HLS_TEXT.missingUri)
     if (tag.name === 'EXT-X-ENDLIST') {
       sawEndlist = true
+      continue
+    }
+    if (tag.name === 'EXT-X-DISCONTINUITY') {
+      pendingDiscontinuity = true
       continue
     }
     if (tag.name === 'EXT-X-MAP') {
