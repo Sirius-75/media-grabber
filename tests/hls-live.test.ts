@@ -345,27 +345,31 @@ describe('直播从点击时的边缘开始', () => {
     ])
   })
 
-  it('media sequence 大幅回退时重新按边缘对齐，已经下过的地址不再请求', async () => {
+  it('media sequence 大幅回退且地址大多是新的时，整窗收录', async () => {
     const harness = makeHarness({
       includeExistingSegments: false,
       playlists: [
         playlist(500, ['a.ts', 'b.ts']),
-        playlist(0, ['a.ts', 'b.ts', 'c.ts']),
-        playlist(0, ['a.ts', 'b.ts', 'c.ts'], { end: true }),
+        playlist(0, ['n0.ts', 'n1.ts', 'n2.ts']),
+        playlist(0, ['n0.ts', 'n1.ts', 'n2.ts'], { end: true }),
       ],
       segments: {
         'https://cdn.example/live/a.ts': bytesOf('a'),
         'https://cdn.example/live/b.ts': bytesOf('b'),
-        'https://cdn.example/live/c.ts': bytesOf('c'),
+        'https://cdn.example/live/n0.ts': bytesOf('0'),
+        'https://cdn.example/live/n1.ts': bytesOf('1'),
+        'https://cdn.example/live/n2.ts': bytesOf('2'),
       },
     })
     const result = await harness.recorder.run()
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(textOf(result.parts)).toBe('bc')
+    expect(textOf(result.parts)).toBe('b012')
     expect(harness.segmentCalls).toEqual([
       'https://cdn.example/live/b.ts',
-      'https://cdn.example/live/c.ts',
+      'https://cdn.example/live/n0.ts',
+      'https://cdn.example/live/n1.ts',
+      'https://cdn.example/live/n2.ts',
     ])
   })
 
@@ -397,12 +401,48 @@ describe('直播从点击时的边缘开始', () => {
     ])
   })
 
+  it('连续两份过期清单地址大多见过时，不重置，也不把 a15/a16 再下一次', async () => {
+    const harness = makeHarness({
+      includeExistingSegments: false,
+      playlists: [
+        playlist(9, ['a9.ts', 'a10.ts', 'a11.ts']),
+        playlist(12, ['a12.ts', 'a13.ts', 'a14.ts']),
+        playlist(14, ['a14.ts', 'a15.ts', 'a16.ts']),
+        playlist(9, ['a9.ts', 'a10.ts', 'a11.ts']),
+        playlist(9, ['a9.ts', 'a10.ts', 'a11.ts']),
+        playlist(17, ['a17.ts'], { end: true }),
+      ],
+      segments: Object.fromEntries(
+        ['a9', 'a10', 'a11', 'a12', 'a13', 'a14', 'a15', 'a16', 'a17'].map((name) => [
+          `https://cdn.example/live/${name}.ts`,
+          bytesOf(name),
+        ]),
+      ),
+    })
+    const result = await harness.recorder.run()
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(textOf(result.parts)).toBe('a11a12a13a14a15a16a17')
+    expect(harness.segmentCalls.filter((url) => url.endsWith('/a11.ts'))).toHaveLength(1)
+    expect(harness.segmentCalls.filter((url) => url.endsWith('/a15.ts'))).toHaveLength(1)
+    expect(harness.segmentCalls.filter((url) => url.endsWith('/a16.ts'))).toHaveLength(1)
+    expect(harness.segmentCalls.filter((url) => url.endsWith('/a9.ts'))).toHaveLength(0)
+  })
+
   it('确认重置后复用的文件名会重新下载', async () => {
     const seg = 'https://cdn.example/live/seg5.ts'
-    const bodies = new Map<string, Uint8Array>([[seg, bytesOf('OLD')]])
+    const bodies = new Map<string, Uint8Array>([
+      [seg, bytesOf('OLD')],
+      ['https://cdn.example/live/n0.ts', bytesOf('0')],
+      ['https://cdn.example/live/n1.ts', bytesOf('1')],
+    ])
     let playlistCall = 0
     const segmentCalls: string[] = []
-    const playlists = [playlist(5, ['seg5.ts']), playlist(0, ['seg5.ts']), playlist(0, ['seg5.ts'], { end: true })]
+    const playlists = [
+      playlist(20, ['seg5.ts']),
+      playlist(0, ['n0.ts', 'n1.ts', 'seg5.ts']),
+      playlist(0, ['n0.ts', 'n1.ts', 'seg5.ts'], { end: true }),
+    ]
     const clock = { now: 0 }
     const recorder = new HlsLiveRecorder({
       playlistUrl: PLAYLIST,
@@ -429,8 +469,8 @@ describe('直播从点击时的边缘开始', () => {
     const recorded = await recorder.run()
     expect(recorded.ok).toBe(true)
     if (!recorded.ok) return
-    expect(textOf(recorded.parts)).toBe('OLDNEW')
-    expect(segmentCalls).toEqual([seg, seg])
+    expect(textOf(recorded.parts)).toBe('OLD01NEW')
+    expect(segmentCalls).toEqual([seg, 'https://cdn.example/live/n0.ts', 'https://cdn.example/live/n1.ts', seg])
   })
 
   it('fMP4 仍然先取初始化段，媒体分片只留边缘那一片', async () => {

@@ -63,9 +63,22 @@ describe('WebVTT 时间戳映射', () => {
     const merged = mergeWebVttSegments([{ text: source }])
     expect(merged).toContain('&lt;b&gt;粗体&lt;/b&gt; <i>斜体</i> <c.red>红</c>')
     const srt = webVttToSrt(merged)
-    expect(srt).toContain('&lt;b&gt;粗体&lt;/b&gt; <i>斜体</i> 红')
+    expect(srt).toContain('＜b＞粗体＜/b＞ <i>斜体</i> 红')
     expect(srt).not.toContain('<b>')
     expect(srt).not.toContain('<c')
+  })
+
+  it('SRT 保留普通 & 和可读的尖括号，只把解码后的格式标签换成全角', () => {
+    const plain = webVttToSrt(mergeWebVttSegments([{ text: 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nA & B\n' }]))
+    expect(plain).toContain('A & B')
+    expect(plain).not.toContain('&amp;')
+    const decodedTag = webVttToSrt(
+      mergeWebVttSegments([{ text: 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n&lt;b&gt;x&lt;/b&gt;\n' }]),
+    )
+    expect(decodedTag).toContain('＜b＞x＜/b＞')
+    expect(decodedTag).not.toContain('<b>')
+    const angles = webVttToSrt(mergeWebVttSegments([{ text: 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\na < b > c\n' }]))
+    expect(angles).toContain('a < b > c')
   })
 
   it('有分片时长时，第一句超过 1 秒的相对时间也会按累计起点顺延', () => {

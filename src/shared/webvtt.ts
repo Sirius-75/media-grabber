@@ -101,8 +101,8 @@ function rawCuePayload(raw: string): string {
   return raw.replace(/\s+\n/g, '\n').trim()
 }
 
-function isSimpleStyleTag(tag: string): boolean {
-  return /^<\/?(i|b|u)(\s[^>]*)?>$/i.test(tag)
+function isKeptStyleTag(tag: string): boolean {
+  return /^<\/?(i|b|u|font)(\s[^>]*)?>$/i.test(tag)
 }
 
 function escapeVttText(value: string): string {
@@ -110,19 +110,22 @@ function escapeVttText(value: string): string {
 }
 
 /**
- * SRT 只保留原文里已经是标签的 i、b、u。
- * `&lt;b&gt;` 这种转义还原后不能变成真正的标签，所以先藏起真标签，再把解码出来的 `<` `>` 重新转义。
+ * SRT 没有实体转义。普通 `&`、`<`、`>` 原样留下。
+ * 原文里已经是标签的 i、b、u、font 保留。由转义还原出来、播放器会当成格式标签的 `<...>`，
+ * 尖括号换成全角，避免 `&lt;b&gt;` 变成真正的 `<b>`。
  */
 function srtCuePayload(raw: string): string {
   const kept: string[] = []
-  const withoutOtherTags = raw.replace(/<[^>]+>/g, (tag) => {
-    if (!isSimpleStyleTag(tag)) return ''
+  const withoutOtherTags = raw.replace(/<\/?[A-Za-z][^>]*>/g, (tag) => {
+    if (!isKeptStyleTag(tag)) return ''
     kept.push(tag)
     return `\u0000${kept.length - 1}\u0000`
   })
   const decoded = decodeEntities(withoutOtherTags)
-  const escaped = escapeVttText(decoded)
-  const restored = escaped.replace(/\u0000(\d+)\u0000/g, (_whole, index: string) => kept[Number(index)] ?? '')
+  const neutralized = decoded.replace(/<\/?(?:i|b|u|font)\b[^>]*>/gi, (tag) =>
+    tag.replaceAll('<', '＜').replaceAll('>', '＞'),
+  )
+  const restored = neutralized.replace(/\u0000(\d+)\u0000/g, (_whole, index: string) => kept[Number(index)] ?? '')
   return restored.replace(/\s+\n/g, '\n').trim()
 }
 
