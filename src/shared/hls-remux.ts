@@ -2,7 +2,7 @@
  * 把已经下好的 MPEG-TS 分片转成 mp4 的计划。
  * 不访问 chrome，也不绑定具体库。真正的转封装函数由调用方注入。
  *
- * 带 EXT-X-MAP 的 fMP4 已经是 mp4，这里原样返回，不再转一次。
+ * 带 EXT-X-MAP 的 fMP4 已经是 mp4，这里不再转一次，只把 tfdt 时间轴归零。
  * 转封装失败、或文件大到再复制一份可能超过内存上限时，仍返回原来的 TS，
  * 让下载本身成功。取消则什么都不保存。
  *
@@ -13,6 +13,7 @@
  * mux.js 原本写成未知（0xFFFFFFFF），只读文件头的播放器会显示成约 13 小时。
  */
 
+import { rebaseFmp4Parts } from './fmp4-rebase'
 import { HLS_HARD_BYTE_LIMIT, HLS_TEXT } from './hls'
 import { patchInitSegmentDuration } from './hls-remux-duration'
 
@@ -127,7 +128,8 @@ export async function remuxTsSegments(input: {
 
 /**
  * 决定最终保存成什么。
- * container 为 mp4 时是 fMP4 路径，分片字节和扩展名都不变。
+ * container 为 mp4 时是 fMP4 路径：分片字节和扩展名都不变，只把 tfdt 归零。
+ * 解析不了时仍原样保存，不让下载失败。大文件也归零，因为只原地改 tfdt。
  */
 export async function planHlsSave(input: {
   container: 'ts' | 'mp4'
@@ -140,11 +142,13 @@ export async function planHlsSave(input: {
   maxOutputBytes?: number
 }): Promise<HlsSavePlan> {
   if (input.container === 'mp4') {
+    // 归零是原地改 tfdt，不复制分片，所以不受转封装的输入上限限制，长直播录制也要归零。
+    const rebased = rebaseFmp4Parts(input.parts)
     return {
       ok: true,
       ext: 'mp4',
       mime: 'video/mp4',
-      parts: [...input.parts],
+      parts: rebased.ok ? [...rebased.parts] : [...input.parts],
       message: HLS_TEXT.complete,
     }
   }

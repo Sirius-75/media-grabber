@@ -711,13 +711,13 @@ async function runHlsLive(request: LiveDownloadRequest, controller: AbortControl
     let planned: HlsSavePlan
     try {
       if (recorded.container === 'mp4') {
-        planned = {
-          ok: true,
-          ext: 'mp4',
-          mime: 'video/mp4',
+        // fMP4 直播也走保存计划，保存前把直播的绝对时间轴归零。
+        planned = await planHlsSave({
+          container: 'mp4',
           parts: recorded.parts,
-          message: HLS_TEXT.complete,
-        }
+          transmux: transmuxTsSegment,
+          signal,
+        })
       } else {
         planned = await planHlsSave({
           container: 'ts',
